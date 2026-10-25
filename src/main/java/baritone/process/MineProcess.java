@@ -64,10 +64,14 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
     private BlockPos branchPoint;
     private GoalRunAway branchPointRunaway;
     private int desiredQuantity;
+    private int depositedTargets; // target items deposited into the wireless terminal: they still count towards desiredQuantity
+    private int targetsBeforeDeposit;
     private int tickCount;
+    private final WirelessTerminalDeposit deposit;
 
     public MineProcess(Baritone baritone) {
         super(baritone);
+        this.deposit = new WirelessTerminalDeposit(ctx);
     }
 
     @Override
@@ -78,23 +82,51 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
     @Override
     public PathingCommand onTick(boolean calcFailed, boolean isSafeToCancel) {
         if (desiredQuantity > 0) {
-            int curr = Stream.concat(ctx.player().getInventory().items.stream(), ctx.player().getInventory().offhand.stream())
-                    .filter(stack -> filter.has(stack))
-                    .mapToInt(ItemStack::getCount).sum();
+            int curr = targetCount() + depositedTargets;
             if (curr >= desiredQuantity) {
                 logDirect("Have " + curr + " valid items");
                 cancel();
                 return null;
             }
         }
-        if (inventoryFull()) {
+        if (deposit.inProgress() || inventoryFull()) {
             // Nothing mined from here on can be picked up; continuing only chases uncollectable drops in a loop
-            logDirect("Inventory full, no room for " + filter + ". Stopping.");
-            if (Baritone.settings().notificationOnMineFail.value) {
-                logNotification("Inventory full, stopping mining", true);
+            String stopReason = null;
+            if (!Baritone.settings().depositToTomsSimpleStorageWirelessTerminal.value) {
+                stopReason = "Inventory full, no room for " + filter;
+            } else if (!deposit.inProgress() && !(isSafeToCancel && ctx.player().onGround())) {
+                return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE); // finish the current movement first
+            } else {
+                if (!deposit.inProgress()) {
+                    targetsBeforeDeposit = targetCount();
+                }
+                baritone.getInputOverrideHandler().clearAllKeys();
+                switch (deposit.tick(filter::has)) {
+                    case RUNNING:
+                        return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+                    case FAILED:
+                        stopReason = "Inventory full, couldn't deposit into the wireless terminal: " + deposit.failure();
+                        break;
+                    case DONE:
+                        int deposited = targetsBeforeDeposit - targetCount();
+                        depositedTargets += deposited;
+                        if (inventoryFull()) {
+                            stopReason = "Inventory still full after depositing into the wireless terminal";
+                        } else {
+                            long free = ctx.player().getInventory().items.stream().filter(ItemStack::isEmpty).count();
+                            logDirect("Deposited into the wireless terminal: " + deposited + " mined items, " + free + " slots free now");
+                        }
+                        break;
+                }
             }
-            cancel();
-            return null;
+            if (stopReason != null) {
+                logDirect(stopReason + ". Stopping.");
+                if (Baritone.settings().notificationOnMineFail.value) {
+                    logNotification(stopReason + ", stopping mining", true);
+                }
+                cancel();
+                return null;
+            }
         }
         // Locations blacklisted as unreachable were only unreachable from where we stood. Once we've moved away,
         // give them another chance, otherwise reachable targets are thrown away for good.
@@ -396,6 +428,15 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         return inv.items.stream().noneMatch(stack -> filter.has(stack) && stack.getCount() < stack.getMaxStackSize());
     }
 
+    /**
+     * @return How many target items we carry, offhand included
+     */
+    private int targetCount() {
+        return Stream.concat(ctx.player().getInventory().items.stream(), ctx.player().getInventory().offhand.stream())
+                .filter(stack -> filter.has(stack))
+                .mapToInt(ItemStack::getCount).sum();
+    }
+
     public List<BlockPos> droppedItemsScan() {
         if (!Baritone.settings().mineScanDroppedItems.value) {
             return Collections.emptyList();
@@ -570,6 +611,8 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             this.filter = null;
         }
         this.desiredQuantity = quantity;
+        this.depositedTargets = 0;
+        this.deposit.reset();
         this.knownOreLocations = new ArrayList<>();
         this.blacklist = new ArrayList<>();
         this.blacklistOrigin = null;

@@ -1443,6 +1443,13 @@ public final class Settings {
     public final Setting<Boolean> notificationOnMineFail = new Setting<>(true);
 
     /**
+     * When mining fills the inventory, open Tom's Simple Storage's Advanced Wireless Terminal (carried in the inventory
+     * and bound to a storage terminal in range) and deposit into it instead of stopping. Deposits everything in the
+     * main inventory plus the mining targets in the hotbar, never tools, armor, food or the terminal itself.
+     */
+    public final Setting<Boolean> depositToTomsSimpleStorageWirelessTerminal = new Setting<>(false);
+
+    /**
      * The number of ticks of elytra movement to simulate while firework boost is not active. Higher values are
      * computationally more expensive.
      */
