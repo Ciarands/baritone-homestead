@@ -96,12 +96,14 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         }
         if (calcFailed) {
             if (!knownOreLocations.isEmpty() && Baritone.settings().blacklistClosestOnFailure.value) {
-                logDirect("Unable to find any path to " + filter + ", blacklisting presumably unreachable closest instance...");
+                // The failed search targeted all known locations at once, so none of them is reachable from here.
+                // Blacklisting only the closest one repeats this failure (~2 s each) for every remaining location.
+                logDirect("Unable to find any path to " + filter + ", blacklisting " + knownOreLocations.size() + " unreachable locations...");
                 if (Baritone.settings().notificationOnMineFail.value) {
-                    logNotification("Unable to find any path to " + filter + ", blacklisting presumably unreachable closest instance...", true);
+                    logNotification("Unable to find any path to " + filter + ", blacklisting unreachable locations...", true);
                 }
-                knownOreLocations.stream().min(Comparator.comparingDouble(ctx.playerFeet()::distSqr)).ifPresent(blacklist::add);
-                knownOreLocations.removeIf(blacklist::contains);
+                blacklist.addAll(knownOreLocations);
+                knownOreLocations.clear();
             } else {
                 logDirect("Unable to find any path to " + filter + ", canceling mine");
                 if (Baritone.settings().notificationOnMineFail.value) {
@@ -125,26 +127,29 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                 return null;
             }
         }
-        Optional<BlockPos> shaft = curr.stream()
-                .filter(pos -> pos.getX() == ctx.playerFeet().getX() && pos.getZ() == ctx.playerFeet().getZ())
-                .filter(pos -> pos.getY() >= ctx.playerFeet().getY())
+        // Break any known target within arm's reach before pathing anywhere. Pathing only reaches a target by
+        // standing in its spot, which in hollow geodes (floating crystals, buds that can't be stood on) often has no
+        // valid standing position even though the block is right in front of us: that fails the path search and
+        // blacklists the block, and repeated, that is the pause loop. Never break the block we're standing on.
+        BlockPos feet = ctx.playerFeet();
+        Optional<BlockPos> inReach = curr.stream()
+                .filter(pos -> !pos.equals(feet.below()))
                 .filter(pos -> !(BlockStateInterface.get(ctx, pos).getBlock() instanceof AirBlock)) // after breaking a block, it takes mineGoalUpdateInterval ticks for it to actually update this list =(
-                .min(Comparator.comparingDouble(ctx.playerFeet().above()::distSqr));
+                .filter(pos -> pos.distToCenterSqr(ctx.playerHead()) <= 36)
+                .sorted(Comparator.comparingDouble(pos -> pos.distToCenterSqr(ctx.playerHead())))
+                .filter(pos -> !MovementHelper.avoidBreaking(baritone.bsi, pos.getX(), pos.getY(), pos.getZ(), baritone.bsi.get0(pos)))
+                .filter(pos -> RotationUtils.reachable(ctx, pos).isPresent())
+                .findFirst();
         baritone.getInputOverrideHandler().clearAllKeys();
-        if (shaft.isPresent() && ctx.player().onGround()) {
-            BlockPos pos = shaft.get();
-            BlockState state = baritone.bsi.get0(pos);
-            if (!MovementHelper.avoidBreaking(baritone.bsi, pos.getX(), pos.getY(), pos.getZ(), state)) {
-                Optional<Rotation> rot = RotationUtils.reachable(ctx, pos);
-                if (rot.isPresent() && isSafeToCancel) {
-                    baritone.getLookBehavior().updateTarget(rot.get(), true);
-                    MovementHelper.switchToBestToolFor(ctx, ctx.world().getBlockState(pos));
-                    if (ctx.isLookingAt(pos) || ctx.playerRotations().isReallyCloseTo(rot.get())) {
-                        baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
-                    }
-                    return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
-                }
+        if (inReach.isPresent() && ctx.player().onGround() && isSafeToCancel) {
+            BlockPos pos = inReach.get();
+            Rotation rot = RotationUtils.reachable(ctx, pos).get();
+            baritone.getLookBehavior().updateTarget(rot, true);
+            MovementHelper.switchToBestToolFor(ctx, ctx.world().getBlockState(pos));
+            if (ctx.isLookingAt(pos) || ctx.playerRotations().isReallyCloseTo(rot)) {
+                baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
             }
+            return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
         }
         PathingCommand command = updateGoal();
         if (command == null) {
