@@ -27,7 +27,8 @@ import baritone.api.utils.BetterBlockPos;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Stream;
-import net.minecraft.world.level.block.AirBlock;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.block.state.BlockState;
 
 public class SurfaceCommand extends Command {
 
@@ -38,29 +39,25 @@ public class SurfaceCommand extends Command {
     @Override
     public void execute(String label, IArgConsumer args) throws CommandException {
         final BetterBlockPos playerPos = ctx.playerFeet();
-        final int surfaceLevel = ctx.world().getSeaLevel();
-        final int worldHeight = ctx.world().getHeight();
+        final int bottom = playerPos.getY() + 1;
 
-        // Ensure this command will not run if you are above the surface level and the block above you is air
-        // As this would imply that your are already on the open surface
-        if (playerPos.getY() > surfaceLevel && ctx.world().getBlockState(playerPos.above()).getBlock() instanceof AirBlock) {
-            logDirect("Already at surface");
+        // Walk the player's column from the build limit down, skipping air and tree canopy (leaves and logs),
+        // and stop at the first real block: that is the surface above the player. If there is none, the
+        // player already has open sky overhead. Unlike checking from sea level up, this works below sea level
+        // (pits, ravines, excavations) and above it (mountains), and doesn't stop at the first cave ceiling.
+        for (int y = ctx.world().getMaxBuildHeight() - 1; y >= bottom; y--) {
+            final BlockState state = ctx.world().getBlockState(new BetterBlockPos(playerPos.getX(), y, playerPos.getZ()));
+            if (state.isAir() || state.is(BlockTags.LEAVES) || state.is(BlockTags.LOGS)) {
+                continue;
+            }
+            // Surface water: stand in its top block; anything solid: stand on top of it.
+            final int goalY = state.getFluidState().isEmpty() ? y + 1 : y;
+            final Goal goal = new GoalBlock(playerPos.getX(), goalY, playerPos.getZ());
+            logDirect(String.format("Going to: %s", goal.toString()));
+            baritone.getCustomGoalProcess().setGoalAndPath(goal);
             return;
         }
-
-        final int startingYPos = Math.max(playerPos.getY(), surfaceLevel);
-
-        for (int currentIteratedY = startingYPos; currentIteratedY < worldHeight; currentIteratedY++) {
-            final BetterBlockPos newPos = new BetterBlockPos(playerPos.getX(), currentIteratedY, playerPos.getZ());
-
-            if (!(ctx.world().getBlockState(newPos).getBlock() instanceof AirBlock) && newPos.getY() > playerPos.getY()) {
-                Goal goal = new GoalBlock(newPos.above());
-                logDirect(String.format("Going to: %s", goal.toString()));
-                baritone.getCustomGoalProcess().setGoalAndPath(goal);
-                return;
-            }
-        }
-        logDirect("No higher location found");
+        logDirect("Already at surface");
     }
 
     @Override

@@ -194,7 +194,10 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             return null;
         }
         // only when we should explore for blocks or are in legit mode we do this
-        int y = Baritone.settings().legitMineYLevel.value;
+        // Legit mining strip-mines at legitMineYLevel. Otherwise nothing matching is loaded nearby, so explore
+        // sideways at the current height instead of tunnelling down to the legit-mining level (which sent
+        // surface searches such as #mine sand straight down to deepslate).
+        int y = legit ? Baritone.settings().legitMineYLevel.value : (branchPoint != null ? branchPoint.getY() : ctx.playerFeet().getY());
         if (branchPoint == null) {
             /*if (!baritone.getPathingBehavior().isPathing() && playerFeet().y == y) {
                 // cool, path is over and we are at desired y
