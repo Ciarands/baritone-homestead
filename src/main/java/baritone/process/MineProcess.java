@@ -57,7 +57,9 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
 
     private BlockOptionalMetaLookup filter;
     private List<BlockPos> knownOreLocations;
-    private List<BlockPos> blacklist; // inaccessible
+    private List<BlockPos> blacklist; // inaccessible from blacklistOrigin
+    private BlockPos blacklistOrigin; // where the blacklisted locations were found unreachable
+    private int failuresWithNothingKnown; // consecutive failed searches with no known targets left: we can't move at all
     private Map<BlockPos, Long> anticipatedDrops;
     private BlockPos branchPoint;
     private GoalRunAway branchPointRunaway;
@@ -94,24 +96,38 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             cancel();
             return null;
         }
+        // Locations blacklisted as unreachable were only unreachable from where we stood. Once we've moved away,
+        // give them another chance, otherwise reachable targets are thrown away for good.
+        if (blacklistOrigin != null && !blacklist.isEmpty() && ctx.playerFeet().distSqr(blacklistOrigin) > 16) {
+            blacklist.clear();
+            blacklistOrigin = null;
+        }
         if (calcFailed) {
-            if (!knownOreLocations.isEmpty() && Baritone.settings().blacklistClosestOnFailure.value) {
-                // The failed search targeted all known locations at once, so none of them is reachable from here.
-                // Blacklisting only the closest one repeats this failure (~2 s each) for every remaining location.
-                logDirect("Unable to find any path to " + filter + ", blacklisting " + knownOreLocations.size() + " unreachable locations...");
+            if (knownOreLocations.isEmpty() && ++failuresWithNothingKnown >= 5) {
+                // Not even exploring can move us: boxed in (e.g. on a ledge with nothing to place). Stop instead of
+                // failing every tick.
+                logDirect("Unable to find any path to " + filter + " and unable to move from here. Stopping.");
                 if (Baritone.settings().notificationOnMineFail.value) {
-                    logNotification("Unable to find any path to " + filter + ", blacklisting unreachable locations...", true);
-                }
-                blacklist.addAll(knownOreLocations);
-                knownOreLocations.clear();
-            } else {
-                logDirect("Unable to find any path to " + filter + ", canceling mine");
-                if (Baritone.settings().notificationOnMineFail.value) {
-                    logNotification("Unable to find any path to " + filter + ", canceling mine", true);
+                    logNotification("Mining stuck: unable to move from here", true);
                 }
                 cancel();
                 return null;
             }
+            logDirect("Unable to find any path to " + filter + ", blacklisting unreachable locations...");
+            if (Baritone.settings().notificationOnMineFail.value) {
+                logNotification("Unable to find any path to " + filter + ", blacklisting unreachable locations...", true);
+            }
+            // The failed search targeted all known locations at once, so none of them can be walked to from here.
+            // Blacklist them all (one at a time repeats this ~2 s failure per location), except the ones within
+            // arm's reach: those are mined directly below without pathing. Then keep going: rescanning finds other
+            // targets, and with none known updateGoal explores, so a failed search doesn't cancel mining.
+            List<BlockPos> unreachable = new ArrayList<>(knownOreLocations);
+            unreachable.removeIf(this::minableFromHere);
+            blacklist.addAll(unreachable);
+            blacklistOrigin = ctx.playerFeet();
+            knownOreLocations.removeAll(unreachable);
+        } else if (!knownOreLocations.isEmpty()) {
+            failuresWithNothingKnown = 0;
         }
 
         updateLoucaSystem();
@@ -130,16 +146,10 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         // Break any known target within arm's reach before pathing anywhere. Pathing only reaches a target by
         // standing in its spot, which in hollow geodes (floating crystals, buds that can't be stood on) often has no
         // valid standing position even though the block is right in front of us: that fails the path search and
-        // blacklists the block, and repeated, that is the pause loop. Never break the block we're standing on.
-        BlockPos feet = ctx.playerFeet();
+        // blacklists the block, and repeated, that is the pause loop.
         Optional<BlockPos> inReach = curr.stream()
-                .filter(pos -> !pos.equals(feet.below()))
-                .filter(pos -> !(BlockStateInterface.get(ctx, pos).getBlock() instanceof AirBlock)) // after breaking a block, it takes mineGoalUpdateInterval ticks for it to actually update this list =(
-                .filter(pos -> pos.distToCenterSqr(ctx.playerHead()) <= 36)
-                .sorted(Comparator.comparingDouble(pos -> pos.distToCenterSqr(ctx.playerHead())))
-                .filter(pos -> !MovementHelper.avoidBreaking(baritone.bsi, pos.getX(), pos.getY(), pos.getZ(), baritone.bsi.get0(pos)))
-                .filter(pos -> RotationUtils.reachable(ctx, pos).isPresent())
-                .findFirst();
+                .filter(this::minableFromHere)
+                .min(Comparator.comparingDouble(pos -> pos.distToCenterSqr(ctx.playerHead())));
         baritone.getInputOverrideHandler().clearAllKeys();
         if (inReach.isPresent() && ctx.player().onGround() && isSafeToCancel) {
             BlockPos pos = inReach.get();
@@ -151,6 +161,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             }
             return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
         }
+
         PathingCommand command = updateGoal();
         if (command == null) {
             // none in range
@@ -211,9 +222,9 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         }
         // only when we should explore for blocks or are in legit mode we do this
         // Legit mining strip-mines at legitMineYLevel. Otherwise nothing matching is loaded nearby, so explore
-        // sideways at the current height instead of tunnelling down to the legit-mining level (which sent
-        // surface searches such as #mine sand straight down to deepslate).
-        int y = legit ? Baritone.settings().legitMineYLevel.value : (branchPoint != null ? branchPoint.getY() : ctx.playerFeet().getY());
+        // at any height: not down to the legit-mining level (which sent surface searches such as #mine sand straight
+        // down to deepslate), and not pinned to the current height either, which is impossible in caves and geodes.
+        Integer y = legit ? Baritone.settings().legitMineYLevel.value : null;
         if (branchPoint == null) {
             /*if (!baritone.getPathingBehavior().isPathing() && playerFeet().y == y) {
                 // cool, path is over and we are at desired y
@@ -356,6 +367,22 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                     SettingsUtil.maybeCensor(z)
             );
         }
+    }
+
+    /**
+     * @return Whether a known target can be broken right now without moving: still there, within reach, safe to break,
+     * visible, and not part of the floor layer we stand on. Breaking floor blocks around ourselves leaves us on a
+     * pillar over the geode's hollow with drops too high to path down from.
+     */
+    private boolean minableFromHere(BlockPos pos) {
+        if (pos.getY() == ctx.playerFeet().getY() - 1) {
+            return false;
+        }
+        BlockState state = BlockStateInterface.get(ctx, pos);
+        return !(state.getBlock() instanceof AirBlock) // after breaking a block, it takes mineGoalUpdateInterval ticks for it to actually update this list =(
+                && pos.distToCenterSqr(ctx.playerHead()) <= 36
+                && !MovementHelper.avoidBreaking(baritone.bsi, pos.getX(), pos.getY(), pos.getZ(), state)
+                && RotationUtils.reachable(ctx, pos).isPresent();
     }
 
     /**
@@ -545,6 +572,8 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         this.desiredQuantity = quantity;
         this.knownOreLocations = new ArrayList<>();
         this.blacklist = new ArrayList<>();
+        this.blacklistOrigin = null;
+        this.failuresWithNothingKnown = 0;
         this.branchPoint = null;
         this.branchPointRunaway = null;
         this.anticipatedDrops = new HashMap<>();
