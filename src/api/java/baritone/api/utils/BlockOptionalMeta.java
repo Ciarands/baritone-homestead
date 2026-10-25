@@ -30,8 +30,10 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.progress.ChunkProgressListener;
+import net.minecraft.server.packs.PackResources;
 import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.VanillaPackResources;
+import net.minecraft.server.packs.repository.RepositorySource;
 import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.util.profiling.InactiveProfiler;
@@ -39,6 +41,8 @@ import net.minecraft.world.RandomSequences;
 import net.minecraft.world.flag.FeatureFlagSet;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.CustomSpawner;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
@@ -225,7 +229,7 @@ public final class BlockOptionalMeta {
             // SimpleReloadInstance lets Fabric API append every mod's SERVER_DATA reload listener, and a
             // listener that fails before reaching the preparation barrier leaves the reload unfinished
             // forever while the render thread waits on it here: the game hangs.
-            MultiPackResourceManager resources = new MultiPackResourceManager(PackType.SERVER_DATA, List.of(getVanillaServerPack()));
+            MultiPackResourceManager resources = new MultiPackResourceManager(PackType.SERVER_DATA, serverDataPacks());
             LootDataManager manager = new LootDataManager();
             Executor executor = new ThreadPerTaskExecutor(Thread::new);
             ThreadLocal<Object> fabricConditionRegistries = fabricConditionRegistries();
@@ -247,6 +251,29 @@ public final class BlockOptionalMeta {
     }
 
     /**
+     * The data packs a server would load before any world data packs: vanilla, then every mod's built-in data
+     * (Fabric). Without the mod packs only vanilla blocks have known drops, so {@code #mine <count> <modded block>}
+     * never sees its target reached.
+     */
+    private static List<PackResources> serverDataPacks() {
+        List<PackResources> packs = new ArrayList<>();
+        packs.add(getVanillaServerPack());
+        try {
+            RepositorySource modPacks = (RepositorySource) Class.forName("net.fabricmc.fabric.impl.resource.loader.ModResourcePackCreator")
+                    .getConstructor(PackType.class)
+                    .newInstance(PackType.SERVER_DATA);
+            modPacks.loadPacks(pack -> {
+                if (pack.isRequired()) {
+                    packs.add(pack.open());
+                }
+            });
+        } catch (ReflectiveOperationException e) {
+            // Not Fabric, or Fabric API is not installed: vanilla only
+        }
+        return packs;
+    }
+
+    /**
      * Fabric API's resource conditions read the registries of the data being loaded from this ThreadLocal
      * when loot tables are reloaded, and fail with a NullPointerException if it is unset.
      *
@@ -263,32 +290,67 @@ public final class BlockOptionalMeta {
         }
     }
 
+    /**
+     * Tools a block's loot table is evaluated with. Drops depend on the tool (silk touch gives the block itself,
+     * shears give leaves, fortune changes ore drops), and the tool used is unknown, so every item any of them can
+     * produce counts as a drop.
+     */
+    private static List<ItemStack> lootTools() {
+        ItemStack silkTouch = new ItemStack(Items.NETHERITE_PICKAXE);
+        silkTouch.enchant(Enchantments.SILK_TOUCH, 1);
+        ItemStack fortune = new ItemStack(Items.NETHERITE_PICKAXE);
+        fortune.enchant(Enchantments.BLOCK_FORTUNE, 3);
+        return List.of(
+                ItemStack.EMPTY,
+                new ItemStack(Items.NETHERITE_PICKAXE),
+                silkTouch,
+                fortune,
+                new ItemStack(Items.NETHERITE_AXE),
+                new ItemStack(Items.NETHERITE_SHOVEL),
+                new ItemStack(Items.NETHERITE_HOE),
+                new ItemStack(Items.SHEARS)
+        );
+    }
+
+    /**
+     * Random rolls per tool, each with its own seed, so chance-based drops (flint from gravel, saplings and sticks
+     * from leaves) are seen too. Results are cached per block, so this only costs anything once.
+     */
+    private static final int LOOT_SEEDS = 32;
+
     private static synchronized List<Item> drops(Block b) {
         return drops.computeIfAbsent(b, block -> {
-            ResourceLocation lootTableLocation = block.getLootTable();
-            if (lootTableLocation == BuiltInLootTables.EMPTY) {
-                return Collections.emptyList();
-            } else {
-                List<Item> items = new ArrayList<>();
-                try {
-
-                    getManager().getLootTable(lootTableLocation).getRandomItemsRaw(
-                            new LootContext.Builder(
-                                    new LootParams.Builder(ServerLevelStub.fastCreate())
-                                            .withParameter(LootContextParams.ORIGIN, Vec3.atLowerCornerOf(BlockPos.ZERO))
-                                            .withParameter(LootContextParams.TOOL, ItemStack.EMPTY)
-                                            .withOptionalParameter(LootContextParams.BLOCK_ENTITY, null)
-                                            .withParameter(LootContextParams.BLOCK_STATE, block.defaultBlockState())
-                                            .create(LootContextParamSets.BLOCK)
-                            ).withOptionalRandomSeed(1L)
-                                    .create(null),
-                            stack -> items.add(stack.getItem())
-                    );
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-                return items;
+            Set<Item> items = new LinkedHashSet<>();
+            // Picking the block up whole (silk touch, or no loot table data) always counts
+            if (block.asItem() != Items.AIR) {
+                items.add(block.asItem());
             }
+            ResourceLocation lootTableLocation = block.getLootTable();
+            if (lootTableLocation != BuiltInLootTables.EMPTY) {
+                long seed = 0;
+                for (ItemStack tool : lootTools()) {
+                    for (int roll = 0; roll < LOOT_SEEDS; roll++, seed++) {
+                        try {
+                            getManager().getLootTable(lootTableLocation).getRandomItemsRaw(
+                                    new LootContext.Builder(
+                                            new LootParams.Builder(ServerLevelStub.fastCreate())
+                                                    .withParameter(LootContextParams.ORIGIN, Vec3.atLowerCornerOf(BlockPos.ZERO))
+                                                    .withParameter(LootContextParams.TOOL, tool)
+                                                    .withOptionalParameter(LootContextParams.BLOCK_ENTITY, null)
+                                                    .withParameter(LootContextParams.BLOCK_STATE, block.defaultBlockState())
+                                                    .create(LootContextParamSets.BLOCK)
+                                    ).withOptionalRandomSeed(seed)
+                                            .create(null),
+                                    stack -> items.add(stack.getItem())
+                            );
+                        } catch (Exception e) {
+                            // A modded loot function that needs a real server; skip this tool/seed
+                        }
+                    }
+                }
+            }
+            items.remove(Items.AIR);
+            return List.copyOf(items);
         });
     }
 
