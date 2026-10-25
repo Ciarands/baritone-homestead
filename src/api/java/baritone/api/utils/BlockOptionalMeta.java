@@ -23,6 +23,8 @@ import com.google.common.collect.ImmutableSet;
 import io.netty.util.concurrent.ThreadPerTaskExecutor;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
@@ -32,8 +34,7 @@ import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.VanillaPackResources;
 import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
-import net.minecraft.server.packs.resources.ReloadableResourceManager;
-import net.minecraft.util.Unit;
+import net.minecraft.util.profiling.InactiveProfiler;
 import net.minecraft.world.RandomSequences;
 import net.minecraft.world.flag.FeatureFlagSet;
 import net.minecraft.world.item.Item;
@@ -220,18 +221,46 @@ public final class BlockOptionalMeta {
 
     public static LootDataManager getManager() {
         if (lootTables == null) {
+            // Reload only the loot table manager, directly. Going through ReloadableResourceManager /
+            // SimpleReloadInstance lets Fabric API append every mod's SERVER_DATA reload listener, and a
+            // listener that fails before reaching the preparation barrier leaves the reload unfinished
+            // forever while the render thread waits on it here: the game hangs.
             MultiPackResourceManager resources = new MultiPackResourceManager(PackType.SERVER_DATA, List.of(getVanillaServerPack()));
-            ReloadableResourceManager resourceManager = new ReloadableResourceManager(PackType.SERVER_DATA);
-            lootTables = new LootDataManager();
-            resourceManager.registerReloadListener(lootTables);
+            LootDataManager manager = new LootDataManager();
+            Executor executor = new ThreadPerTaskExecutor(Thread::new);
+            ThreadLocal<Object> fabricConditionRegistries = fabricConditionRegistries();
+            if (fabricConditionRegistries != null) {
+                fabricConditionRegistries.set(RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY));
+            }
             try {
-                resourceManager.createReload(new ThreadPerTaskExecutor(Thread::new), new ThreadPerTaskExecutor(Thread::new), CompletableFuture.completedFuture(Unit.INSTANCE), resources.listPacks().toList()).done().get();
+                manager.reload(CompletableFuture::completedFuture, resources, InactiveProfiler.INSTANCE, InactiveProfiler.INSTANCE, executor, executor).get();
             } catch (Exception exception) {
                 throw new RuntimeException(exception);
+            } finally {
+                if (fabricConditionRegistries != null) {
+                    fabricConditionRegistries.remove();
+                }
             }
-
+            lootTables = manager;
         }
         return lootTables;
+    }
+
+    /**
+     * Fabric API's resource conditions read the registries of the data being loaded from this ThreadLocal
+     * when loot tables are reloaded, and fail with a NullPointerException if it is unset.
+     *
+     * @return The ThreadLocal, or {@code null} when Fabric API is not present
+     */
+    @SuppressWarnings("unchecked")
+    private static ThreadLocal<Object> fabricConditionRegistries() {
+        try {
+            return (ThreadLocal<Object>) Class.forName("net.fabricmc.fabric.impl.resource.conditions.ResourceConditionsImpl")
+                    .getField("CURRENT_REGISTRIES")
+                    .get(null);
+        } catch (ReflectiveOperationException e) {
+            return null;
+        }
     }
 
     private static synchronized List<Item> drops(Block b) {
