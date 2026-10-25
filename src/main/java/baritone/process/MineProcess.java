@@ -28,8 +28,10 @@ import baritone.api.utils.input.Input;
 import baritone.cache.CachedChunk;
 import baritone.pathing.movement.CalculationContext;
 import baritone.pathing.movement.MovementHelper;
+import baritone.pathing.path.PathExecutor;
 import baritone.utils.BaritoneProcessHelper;
 import baritone.utils.BlockStateInterface;
+import baritone.utils.pathing.Avoidance;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
@@ -59,7 +61,9 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
     private List<BlockPos> knownOreLocations;
     private List<BlockPos> blacklist; // inaccessible from blacklistOrigin
     private BlockPos blacklistOrigin; // where the blacklisted locations were found unreachable
+    private Map<BlockPos, Integer> unreachableCount; // how many failed searches each location was part of, this run
     private int failuresWithNothingKnown; // consecutive failed searches with no known targets left: we can't move at all
+    private List<BlockPos> collectingDrops; // the drops we're heading for, or null when heading for targets
     private Map<BlockPos, Long> anticipatedDrops;
     private BlockPos branchPoint;
     private GoalRunAway branchPointRunaway;
@@ -68,10 +72,16 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
     private int targetsBeforeDeposit;
     private int tickCount;
     private final WirelessTerminalDeposit deposit;
+    /**
+     * Failed searches after which a location stays blacklisted for the rest of the run
+     */
+    private static final int MAX_UNREACHABLE = 3;
+    private final DropObserver drops;
 
     public MineProcess(Baritone baritone) {
         super(baritone);
         this.deposit = new WirelessTerminalDeposit(ctx);
+        this.drops = new DropObserver(ctx);
     }
 
     @Override
@@ -81,6 +91,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
 
     @Override
     public PathingCommand onTick(boolean calcFailed, boolean isSafeToCancel) {
+        drops.tick(filter::has, filter::has);
         if (desiredQuantity > 0) {
             int curr = targetCount() + depositedTargets;
             if (curr >= desiredQuantity) {
@@ -89,10 +100,14 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                 return null;
             }
         }
-        if (deposit.inProgress() || inventoryFull()) {
-            // Nothing mined from here on can be picked up; continuing only chases uncollectable drops in a loop
+        boolean canDeposit = Baritone.settings().depositToTomsSimpleStorageWirelessTerminal.value;
+        boolean noFreeSlot = ctx.player().getInventory().getFreeSlot() == -1;
+        // With somewhere to deposit, go as soon as no slot is free: from then on, any target we don't already hold a
+        // part stack of can't be picked up, so mining it is wasted. Without, keep going while any target still fits.
+        if (deposit.inProgress() || (canDeposit ? noFreeSlot : inventoryFull())) {
             String stopReason = null;
-            if (!Baritone.settings().depositToTomsSimpleStorageWirelessTerminal.value) {
+            if (!canDeposit) {
+                // nothing mined from here on can be picked up; continuing only chases uncollectable drops in a loop
                 stopReason = "Inventory full, no room for " + filter;
             } else if (!deposit.inProgress() && !(isSafeToCancel && ctx.player().onGround())) {
                 return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE); // finish the current movement first
@@ -101,7 +116,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                     targetsBeforeDeposit = targetCount();
                 }
                 baritone.getInputOverrideHandler().clearAllKeys();
-                switch (deposit.tick(filter::has)) {
+                switch (deposit.tick(this::isTargetDrop)) {
                     case RUNNING:
                         return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
                     case FAILED:
@@ -110,7 +125,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                     case DONE:
                         int deposited = targetsBeforeDeposit - targetCount();
                         depositedTargets += deposited;
-                        if (inventoryFull()) {
+                        if (ctx.player().getInventory().getFreeSlot() == -1) {
                             stopReason = "Inventory still full after depositing into the wireless terminal";
                         } else {
                             long free = ctx.player().getInventory().items.stream().filter(ItemStack::isEmpty).count();
@@ -129,12 +144,20 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             }
         }
         // Locations blacklisted as unreachable were only unreachable from where we stood. Once we've moved away,
-        // give them another chance, otherwise reachable targets are thrown away for good.
+        // give them another chance, otherwise reachable targets are thrown away for good; but not endlessly: one
+        // that failed from several places is sealed off (in someone's wall, encased), and each retry costs a search.
         if (blacklistOrigin != null && !blacklist.isEmpty() && ctx.playerFeet().distSqr(blacklistOrigin) > 16) {
-            blacklist.clear();
+            // a new list: rescans on another thread may be reading the old one
+            blacklist = blacklist.stream().filter(pos -> unreachableCount.getOrDefault(pos, 0) >= MAX_UNREACHABLE).collect(Collectors.toCollection(ArrayList::new));
             blacklistOrigin = null;
         }
-        if (calcFailed) {
+        if (calcFailed && collectingDrops != null) {
+            // it was the drops we couldn't get to: leave them, as with unreachable targets
+            blacklist.addAll(collectingDrops);
+            collectingDrops.forEach(pos -> unreachableCount.merge(pos, 1, Integer::sum));
+            blacklistOrigin = ctx.playerFeet();
+            collectingDrops = null;
+        } else if (calcFailed) {
             if (knownOreLocations.isEmpty() && ++failuresWithNothingKnown >= 5) {
                 // Not even exploring can move us: boxed in (e.g. on a ledge with nothing to place). Stop instead of
                 // failing every tick.
@@ -156,6 +179,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             List<BlockPos> unreachable = new ArrayList<>(knownOreLocations);
             unreachable.removeIf(this::minableFromHere);
             blacklist.addAll(unreachable);
+            unreachable.forEach(pos -> unreachableCount.merge(pos, 1, Integer::sum));
             blacklistOrigin = ctx.playerFeet();
             knownOreLocations.removeAll(unreachable);
         } else if (!knownOreLocations.isEmpty()) {
@@ -175,6 +199,15 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                 return null;
             }
         }
+        // Collect target drops lying a few blocks off before breaking more: mining everything within reach first left
+        // drops inside dense veins until nothing was in reach anymore (and with drops right next to us, in pockets we
+        // can't step into, they're left alone: we'd only stand there).
+        List<BlockPos> drops = settledDropsNearby();
+        if (!drops.isEmpty() && !Baritone.settings().legitMine.value) {
+            collectingDrops = drops;
+            return new PathingCommand(new GoalComposite(drops.stream().map(GoalTwoBlocks::new).toArray(Goal[]::new)), PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+        }
+        collectingDrops = null;
         // Break any known target within arm's reach before pathing anywhere. Pathing only reaches a target by
         // standing in its spot, which in hollow geodes (floating crystals, buds that can't be stood on) often has no
         // valid standing position even though the block is right in front of us: that fails the path search and
@@ -243,10 +276,19 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         if (!locs.isEmpty()) {
             CalculationContext context = new CalculationContext(baritone);
             List<BlockPos> locs2 = prune(context, new ArrayList<>(locs), filter, Baritone.settings().mineMaxOreLocationsCount.value, blacklist, droppedItemsScan());
-            // can't reassign locs, gotta make a new var locs2, because we use it in a lambda right here, and variables you use in a lambda must be effectively final
-            Goal goal = new GoalComposite(locs2.stream().map(loc -> coalesce(loc, locs2, context)).toArray(Goal[]::new));
             knownOreLocations = locs2;
-            return new PathingCommand(goal, legit ? PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH : PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+            // with none left after pruning (just broken, drops not landed yet, or all off limits) there's nothing to
+            // path to: an empty goal would only fail the search and blacklist things. Explore instead, below.
+            if (!locs2.isEmpty()) {
+                // can't reassign locs, gotta make a new var locs2, because we use it in a lambda right here, and variables you use in a lambda must be effectively final
+                Goal goal = new GoalComposite(locs2.stream().map(loc -> coalesce(loc, locs2, context)).toArray(Goal[]::new));
+                // An exploring path never ends in its goal, so plain revalidation doesn't interrupt it: targets showing
+                // up meanwhile (drops landing after the last block broke, ore coming into view) would wait for the
+                // whole explore segment, by which time they're far behind
+                PathExecutor current = baritone.getPathingBehavior().getCurrent();
+                boolean exploring = current != null && branchPointRunaway != null && current.getPath().getGoal() == branchPointRunaway;
+                return new PathingCommand(goal, legit || exploring ? PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH : PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+            }
         }
         // we don't know any ore locations at the moment
         if (!legit && !Baritone.settings().exploreForBlocks.value) {
@@ -425,7 +467,14 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         if (inv.getFreeSlot() != -1) {
             return false;
         }
-        return inv.items.stream().noneMatch(stack -> filter.has(stack) && stack.getCount() < stack.getMaxStackSize());
+        return inv.items.stream().noneMatch(stack -> isTargetDrop(stack) && stack.getCount() < stack.getMaxStackSize());
+    }
+
+    /**
+     * @return Whether this is something mining the targets yields: predicted from their loot tables, or seen dropping
+     */
+    private boolean isTargetDrop(ItemStack stack) {
+        return filter.has(stack) || drops.isDropOf(filter::has, stack.getItem());
     }
 
     /**
@@ -433,8 +482,42 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
      */
     private int targetCount() {
         return Stream.concat(ctx.player().getInventory().items.stream(), ctx.player().getInventory().offhand.stream())
-                .filter(stack -> filter.has(stack))
+                .filter(this::isTargetDrop)
                 .mapToInt(ItemStack::getCount).sum();
+    }
+
+    /**
+     * Settled ages (ticks): a drop still flying out of the broken block isn't worth chasing yet
+     */
+    private static final int SETTLED_DROP_AGE = 10;
+    private static final double NEARBY_DROP_DISTANCE_SQ = 8 * 8;
+    /**
+     * Within this, a drop is picked up just by standing where we are, unless it's somewhere we can't step into anyway
+     */
+    private static final double PICKUP_DISTANCE_SQ = 1.5 * 1.5;
+
+    /**
+     * @return Positions of settled target drops within a few blocks, that there's room for, worth walking to
+     */
+    private List<BlockPos> settledDropsNearby() {
+        if (!Baritone.settings().mineScanDroppedItems.value) {
+            return Collections.emptyList();
+        }
+        Inventory inv = ctx.player().getInventory();
+        List<BlockPos> ret = new ArrayList<>();
+        for (Entity entity : ((ClientLevel) ctx.world()).entitiesForRendering()) {
+            if (!(entity instanceof ItemEntity)) {
+                continue;
+            }
+            ItemEntity item = (ItemEntity) entity;
+            double distSq = item.distanceToSqr(ctx.player());
+            if (item.getAge() >= SETTLED_DROP_AGE && distSq > PICKUP_DISTANCE_SQ && distSq <= NEARBY_DROP_DISTANCE_SQ
+                    && !blacklist.contains(item.blockPosition()) && isTargetDrop(item.getItem())
+                    && (inv.getFreeSlot() != -1 || inv.getSlotWithRemainingSpace(item.getItem()) != -1)) {
+                ret.add(item.blockPosition());
+            }
+        }
+        return ret;
     }
 
     public List<BlockPos> droppedItemsScan() {
@@ -447,7 +530,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             if (entity instanceof ItemEntity) {
                 ItemEntity ei = (ItemEntity) entity;
                 // Only items there is room for: walking onto a drop that can't be picked up never removes it
-                if (filter.has(ei.getItem()) && (inv.getFreeSlot() != -1 || inv.getSlotWithRemainingSpace(ei.getItem()) != -1)) {
+                if (isTargetDrop(ei.getItem()) && (inv.getFreeSlot() != -1 || inv.getSlotWithRemainingSpace(ei.getItem()) != -1)) {
                     ret.add(entity.blockPosition());
                 }
             }
@@ -537,6 +620,11 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             }
             return false;
         });
+        // mining is a vibration: near a shrieker it can summon a Warden
+        List<BlockPos> shriekers = Baritone.settings().avoidSculkShriekers.value
+                ? Avoidance.sculkShriekers(ctx.worldData, ctx.getBaritone().getPlayerContext().playerFeet())
+                : Collections.emptyList();
+        int shriekerRadiusSq = Avoidance.SCULK_SHRIEKER_RADIUS * Avoidance.SCULK_SHRIEKER_RADIUS;
         List<BlockPos> locs = locs2
                 .stream()
                 .distinct()
@@ -560,6 +648,8 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                 .filter(pos -> pos.getY() <= Baritone.settings().maxYLevelWhileMining.value)
 
                 .filter(pos -> !blacklist.contains(pos))
+
+                .filter(pos -> shriekers.stream().noneMatch(shrieker -> shrieker.distSqr(pos) <= shriekerRadiusSq))
 
                 .sorted(Comparator.comparingDouble(ctx.getBaritone().getPlayerContext().player().blockPosition()::distSqr))
                 .collect(Collectors.toList());
@@ -616,6 +706,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         this.knownOreLocations = new ArrayList<>();
         this.blacklist = new ArrayList<>();
         this.blacklistOrigin = null;
+        this.unreachableCount = new HashMap<>();
         this.failuresWithNothingKnown = 0;
         this.branchPoint = null;
         this.branchPointRunaway = null;
@@ -623,6 +714,14 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         if (filter != null) {
             rescan(new ArrayList<>(), new CalculationContext(baritone));
         }
+    }
+
+    /**
+     * @return Whether we're mining and this is one of the blocks being mined
+     */
+    public boolean isTarget(BlockState state) {
+        BlockOptionalMetaLookup filter = this.filter; // read once: it's cleared on the main thread when mining stops
+        return filter != null && filter.has(state);
     }
 
     private BlockOptionalMetaLookup filterFilter() {

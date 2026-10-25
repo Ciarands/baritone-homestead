@@ -32,10 +32,14 @@ import baritone.utils.ToolSet;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.*;
 import net.minecraft.world.level.block.piston.MovingPistonBlock;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.BooleanProperty;
 import net.minecraft.world.level.block.state.properties.DoorHingeSide;
 import net.minecraft.world.level.block.state.properties.Half;
@@ -51,7 +55,9 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
+import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 import static baritone.api.utils.RotationUtils.DEG_TO_RAD_F;
@@ -148,7 +154,7 @@ public interface MovementHelper extends ActionCosts, Helper {
         if (block == Blocks.BIG_DRIPLEAF) {
             return NO;
         }
-        if (block == Blocks.POWDER_SNOW) {
+        if (block == Blocks.POWDER_SNOW || block instanceof WitherRoseBlock || isLitHotBlock(state)) {
             return NO;
         }
         if (Baritone.settings().blocksToAvoid.value.contains(block)) {
@@ -363,7 +369,43 @@ public interface MovementHelper extends ActionCosts, Helper {
                 || block instanceof BaseFireBlock
                 || block == Blocks.END_PORTAL
                 || block == Blocks.COBWEB
-                || block == Blocks.BUBBLE_COLUMN;
+                || block == Blocks.BUBBLE_COLUMN
+                || block instanceof WitherRoseBlock
+                || isLitHotBlock(state);
+    }
+
+    /**
+     * Classes of lit blocks that act on whatever touches them, by whether they do. Filled lazily: one lookup per class
+     */
+    Map<Class<?>, Boolean> HOT_WHEN_LIT = new ConcurrentHashMap<>();
+
+    /**
+     * @return Whether this is a lit block that burns what touches it: campfires, Farmer's Delight and Nether's Delight
+     * stoves, and the like from other mods. Recognized as a lit block whose class overrides what happens on stepping on
+     * or into it (redstone ore, which only lights up, aside).
+     */
+    static boolean isLitHotBlock(BlockState state) {
+        if (!state.hasProperty(BlockStateProperties.LIT) || !state.getValue(BlockStateProperties.LIT) || state.getBlock() instanceof RedStoneOreBlock) {
+            return false;
+        }
+        return HOT_WHEN_LIT.computeIfAbsent(state.getBlock().getClass(), MovementHelper::actsOnContact);
+    }
+
+    private static boolean actsOnContact(Class<?> blockClass) {
+        for (Method method : blockClass.getMethods()) {
+            Class<?> declaring = method.getDeclaringClass();
+            if (declaring == Block.class || declaring == BlockBehaviour.class || method.getReturnType() != void.class) {
+                continue;
+            }
+            List<Class<?>> params = Arrays.asList(method.getParameterTypes());
+            // stepOn(Level, BlockPos, BlockState, Entity) and entityInside(BlockState, Level, BlockPos, Entity), by
+            // signature: their names differ between development and the game's obfuscated runtime
+            if (params.equals(Arrays.asList(Level.class, BlockPos.class, BlockState.class, Entity.class))
+                    || params.equals(Arrays.asList(BlockState.class, Level.class, BlockPos.class, Entity.class))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -393,6 +435,9 @@ public interface MovementHelper extends ActionCosts, Helper {
 
     static Ternary canWalkOnBlockState(BlockState state) {
         Block block = state.getBlock();
+        if (isLitHotBlock(state)) {
+            return NO;
+        }
         if (isBlockNormalCube(state) && (block != Blocks.MAGMA_BLOCK || Baritone.settings().allowWalkOnMagmaBlocks.value) && block != Blocks.BUBBLE_COLUMN && block != Blocks.HONEY_BLOCK) {
             return YES;
         }

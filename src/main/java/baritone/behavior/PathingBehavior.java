@@ -369,6 +369,15 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
     }
 
     @Override
+    public void onPlayerDeath() {
+        if (Baritone.settings().cancelOnDeath.value && baritone.getPathingControlManager().mostRecentInControl().isPresent()) {
+            // carrying on from the respawn point would wander off from the grave and everything else
+            logDirect("Died: stopping");
+            forceCancel();
+        }
+    }
+
+    @Override
     public void forceCancel() { // exposed on public api because :sob:
         cancelEverything();
         secretInternalSegmentCancel();

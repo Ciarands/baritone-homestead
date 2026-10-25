@@ -22,9 +22,13 @@ import baritone.api.IBaritone;
 import baritone.api.pathing.movement.ActionCosts;
 import baritone.cache.WorldData;
 import baritone.pathing.precompute.PrecomputedData;
+import baritone.process.MineProcess;
 import baritone.utils.BlockStateInterface;
+import baritone.utils.ClaimsCompat;
 import baritone.utils.ToolSet;
 import baritone.utils.pathing.BetterWorldBorder;
+import it.unimi.dsi.fastutil.longs.LongSet;
+import it.unimi.dsi.fastutil.longs.LongSets;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.player.Inventory;
@@ -32,6 +36,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
@@ -81,6 +86,12 @@ public class CalculationContext {
     public final double walkOnWaterOnePenalty;
     public final boolean allowWalkOnMagmaBlocks;
     public final BetterWorldBorder worldBorder;
+    /**
+     * Chunks claimed by others (keys of {@link net.minecraft.world.level.ChunkPos#asLong}), snapshotted on the main thread
+     */
+    private final LongSet claimedByOthers;
+    private final boolean avoidBreakingBlockEntities;
+    private final MineProcess mineProcess;
 
     public final PrecomputedData precomputedData;
 
@@ -131,6 +142,12 @@ public class CalculationContext {
         // because if some movements are calculated one way and others are calculated another way,
         // then you get a wildly inconsistent path that isn't optimal for either scenario.
         this.worldBorder = new BetterWorldBorder(world.getWorldBorder());
+        // claims well beyond the loaded area: a path can't break or place where nothing is loaded anyway
+        this.claimedByOthers = Baritone.settings().respectClaims.value
+                ? ClaimsCompat.claimedByOthers(world.dimension().location(), player.getUUID(), player.blockPosition().getX() >> 4, player.blockPosition().getZ() >> 4, 16)
+                : LongSets.EMPTY_SET;
+        this.avoidBreakingBlockEntities = Baritone.settings().avoidBreakingBlockEntities.value;
+        this.mineProcess = ((Baritone) baritone).getMineProcess();
     }
 
     public final IBaritone getBaritone() {
@@ -179,6 +196,10 @@ public class CalculationContext {
         if (isPossiblyProtected(x, y, z)) {
             return COST_INF;
         }
+        // someone's storage, machine, bed, grave...: only break it if it's what we're mining
+        if (avoidBreakingBlockEntities && current.hasBlockEntity() && !allowBreakAnyway.contains(current.getBlock()) && !mineProcess.isTarget(current)) {
+            return COST_INF;
+        }
         return 1;
     }
 
@@ -187,7 +208,6 @@ public class CalculationContext {
     }
 
     public boolean isPossiblyProtected(int x, int y, int z) {
-        // TODO more protection logic here; see #220
-        return false;
+        return !claimedByOthers.isEmpty() && claimedByOthers.contains(ChunkPos.asLong(x >> 4, z >> 4));
     }
 }

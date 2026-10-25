@@ -477,7 +477,8 @@ public final class Settings {
     public final Setting<Double> mobAvoidanceCoefficient = new Setting<>(1.5);
 
     /**
-     * Distance to avoid mobs.
+     * Distance to avoid hostile mobs. Passive and ambient mobs are ignored, and where several mobs' areas overlap the
+     * cost isn't multiplied again for each one.
      */
     public final Setting<Integer> mobAvoidanceRadius = new Setting<>(8);
 
@@ -1443,11 +1444,51 @@ public final class Settings {
     public final Setting<Boolean> notificationOnMineFail = new Setting<>(true);
 
     /**
-     * When mining fills the inventory, open Tom's Simple Storage's Advanced Wireless Terminal (carried in the inventory
-     * and bound to a storage terminal in range) and deposit into it instead of stopping. Deposits everything in the
-     * main inventory plus the mining targets in the hotbar, never tools, armor, food or the terminal itself.
+     * When mining fills the inventory, open Tom's Simple Storage's Advanced Wireless Terminal (carried in the inventory,
+     * offhand or a trinket slot, and bound to a storage terminal in range) and deposit into it instead of stopping.
+     * Deposits everything in the main inventory plus the mining targets in the hotbar, never tools, armor, food or the
+     * terminal itself.
      */
     public final Setting<Boolean> depositToTomsSimpleStorageWirelessTerminal = new Setting<>(false);
+
+    /**
+     * When the tool about to break a block would trigger the Vein Mining mod (which then breaks the whole connected
+     * vein, server side), check every block of that vein first. If any is unsafe to break (touching liquid, something
+     * Baritone avoids breaking, or the block we're standing on), sneak so Vein Mining stays off and only the one block
+     * breaks. Safe veins are left to Vein Mining.
+     */
+    public final Setting<Boolean> accountForVeinMining = new Setting<>(true);
+
+    /**
+     * When breaking a tree block (a log with an axe, or cactus, bamboo, a huge mushroom or chorus) would make the Falling
+     * Trees mod fell the whole tree, sneak so only that block breaks, unless it's what we're mining. Felling a tree in
+     * the way takes up to 16x longer than breaking one log and showers its drops around.
+     */
+    public final Setting<Boolean> accountForFallingTrees = new Setting<>(true);
+
+    /**
+     * Never break or place blocks in chunks claimed by someone else through Open Parties and Claims (server claims
+     * included): the server refuses it, so such a path never completes, and it's their build.
+     */
+    public final Setting<Boolean> respectClaims = new Setting<>(true);
+
+    /**
+     * Never break blocks that have a block entity (chests, barrels, storage, machines, furniture, beds, signs, graves,
+     * spawners, beehives, sculk sensors...) to get somewhere. What's being mined is still broken.
+     */
+    public final Setting<Boolean> avoidBreakingBlockEntities = new Setting<>(true);
+
+    /**
+     * Stay away from sculk shriekers: a sculk sensor picks up vibrations (footsteps, mining) within 8 blocks and sets
+     * off shriekers within 8 blocks of it, and enough shrieks summon a Warden. Targets within 16 blocks of a shrieker
+     * aren't mined, and paths avoid the area, whether or not {@link #avoidance} is on.
+     */
+    public final Setting<Boolean> avoidSculkShriekers = new Setting<>(true);
+
+    /**
+     * Stop whatever Baritone is doing when the player dies, instead of carrying on from the respawn point
+     */
+    public final Setting<Boolean> cancelOnDeath = new Setting<>(true);
 
     /**
      * The number of ticks of elytra movement to simulate while firework boost is not active. Higher values are

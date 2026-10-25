@@ -26,6 +26,7 @@ import baritone.api.event.events.ChunkEvent;
 import baritone.api.event.events.type.EventState;
 import baritone.api.utils.Pair;
 import baritone.cache.CachedChunk;
+import baritone.utils.BackgroundMenus;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraft.client.player.LocalPlayer;
@@ -207,6 +208,29 @@ public class MixinClientPlayNetHandler {
             if (player != null && player.connection == (ClientPacketListener) (Object) this) {
                 ibaritone.getGameEventHandler().onPlayerDeath();
             }
+        }
+    }
+
+    @Inject(
+            method = "handleOpenScreen",
+            at = @At("HEAD"),
+            cancellable = true
+    )
+    private void onOpenScreen(ClientboundOpenScreenPacket packet, CallbackInfo ci) {
+        // first called on the network thread, which hands the packet to the main thread: act only there
+        if (this.minecraft.isSameThread() && BackgroundMenus.onOpenScreen(packet.getType(), packet.getContainerId())) {
+            ci.cancel();
+        }
+    }
+
+    @Inject(
+            method = "handleContainerClose",
+            at = @At("HEAD"),
+            cancellable = true
+    )
+    private void onContainerClose(ClientboundContainerClosePacket packet, CallbackInfo ci) {
+        if (this.minecraft.isSameThread() && BackgroundMenus.onCloseContainer(packet.getContainerId())) {
+            ci.cancel();
         }
     }
 

@@ -18,36 +18,44 @@
 package baritone.process;
 
 import baritone.api.utils.IPlayerContext;
+import baritone.utils.BackgroundMenus;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ClickType;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 
+import java.lang.reflect.Method;
 import java.util.function.Predicate;
 
 /**
- * Empties the inventory into a Tom's Simple Storage network through an Advanced Wireless Terminal: using the item opens
- * its bound storage terminal remotely, and shift-clicking an inventory slot in that screen stores the stack.
+ * Empties the inventory into a Tom's Simple Storage network through an Advanced Wireless Terminal: the terminal's bound
+ * storage terminal is opened remotely, and shift-clicking an inventory slot in its menu stores the stack.
+ * <p>
+ * Opening sends the same request as Tom's "Open Terminal" key, so the server finds the terminal wherever it is
+ * carried: hands, inventory or a trinket slot. The menu is used in the background ({@link BackgroundMenus}): no screen
+ * opens, so it works unfocused, paused, or with another screen showing, and the player sees nothing. Tom's Simple
+ * Storage is an optional dependency, reached by reflection.
  * <p>
  * Driven one game tick at a time by {@link #tick}, while the caller keeps pathing paused.
  */
 final class WirelessTerminalDeposit {
 
     private static final ResourceLocation TERMINAL = new ResourceLocation("toms_storage", "ts.adv_wireless_terminal");
+    private static final String TOMS_STORAGE = "toms_storage";
     /**
-     * The server opens the terminal within a tick or two. Out of range or with the terminal's chunk unloaded it
-     * never does (it only sends a chat message), so give up after this long.
+     * The server opens the terminal within a tick or two. A request can get lost (opened while the server was busy with
+     * another of our containers, a lag spike), so it's sent again after this long, a few times
      */
-    private static final int OPEN_TIMEOUT_TICKS = 40;
+    private static final int OPEN_RETRY_TICKS = 40;
+    private static final int OPEN_ATTEMPTS = 3;
     /**
-     * Ticks to wait after shift-clicking before closing, so the server's inventory updates have arrived and the caller
-     * sees the freed slots.
+     * After shift-clicking, the server's inventory updates are waited for until a slot is free, at most this long
      */
-    private static final int SYNC_TICKS = 20;
+    private static final int SYNC_MAX_TICKS = 100;
+    private static final int SYNC_MIN_TICKS = 2;
 
     enum Status {
         RUNNING,
@@ -64,10 +72,9 @@ final class WirelessTerminalDeposit {
     private final IPlayerContext ctx;
     private State state = State.IDLE;
     private int ticks;
-    private InteractionHand hand;
-    private int previousSelected;
-    private int swappedFrom; // main inventory slot the terminal was swapped out of into the hotbar, or -1
+    private int attempts;
     private String failure;
+    private static Method openTerminal; // NetworkHandler.openTerminal(), sends the "open terminal" key's request
 
     WirelessTerminalDeposit(IPlayerContext ctx) {
         this.ctx = ctx;
@@ -94,7 +101,10 @@ final class WirelessTerminalDeposit {
             case OPENING:
                 return awaitOpen(isTarget);
             case DEPOSITED:
-                if (++ticks < SYNC_TICKS) {
+                ticks++;
+                // done once the server has freed a slot, or there's nothing more to wait for
+                boolean freed = ticks >= SYNC_MIN_TICKS && ctx.player().getInventory().getFreeSlot() != -1;
+                if (!freed && ticks < SYNC_MAX_TICKS && terminalMenu() != null) {
                     return Status.RUNNING;
                 }
                 finish();
@@ -105,7 +115,7 @@ final class WirelessTerminalDeposit {
     }
 
     /**
-     * Abandons a deposit in progress: closes the terminal if we opened it and puts the hotbar back.
+     * Abandons a deposit in progress, closing the terminal if we opened it.
      */
     void reset() {
         if (state != State.IDLE && ctx.player() != null) {
@@ -115,50 +125,47 @@ final class WirelessTerminalDeposit {
     }
 
     private Status start() {
-        Inventory inv = ctx.player().getInventory();
-        previousSelected = inv.selected;
-        swappedFrom = -1;
-        if (isTerminal(ctx.player().getOffhandItem())) {
-            hand = InteractionHand.OFF_HAND;
-        } else {
-            int slot = -1;
-            for (int i = 0; i < inv.items.size(); i++) {
-                if (isTerminal(inv.items.get(i))) {
-                    slot = i;
-                    break;
-                }
-            }
-            if (slot == -1) {
-                return fail("no Advanced Wireless Terminal in the inventory");
-            }
-            hand = InteractionHand.MAIN_HAND;
-            if (Inventory.isHotbarSlot(slot)) {
-                inv.selected = slot;
-            } else {
-                // inventory slot ids in the player's own menu: main inventory 9-35 matches, hotbar 0-8 is at 36-44
-                ctx.playerController().windowClick(ctx.player().inventoryMenu.containerId, slot, inv.selected, ClickType.SWAP, ctx.player());
-                swappedFrom = slot;
+        if (openTerminal == null) {
+            try {
+                openTerminal = Class.forName("com.tom.storagemod.network.NetworkHandler").getMethod("openTerminal");
+            } catch (ReflectiveOperationException | LinkageError e) {
+                return fail("Tom's Simple Storage isn't installed");
             }
         }
+        attempts = 0;
         state = State.OPENING;
+        return requestOpen();
+    }
+
+    /**
+     * Sends the request Tom's "Open Terminal" key sends: the server looks for the terminal in hands, inventory and
+     * trinket slots, and opens its storage terminal. It's taken in the background, without a screen.
+     */
+    private Status requestOpen() {
+        BackgroundMenus.expect(TOMS_STORAGE);
+        try {
+            openTerminal.invoke(null);
+        } catch (ReflectiveOperationException e) {
+            finish();
+            return fail("couldn't ask Tom's Simple Storage to open the terminal: " + e);
+        }
+        attempts++;
         ticks = 0;
         return Status.RUNNING;
     }
 
     private Status awaitOpen(Predicate<ItemStack> isTarget) {
-        if (ticks++ == 0) {
-            // useItem sends the selected hotbar slot first if it changed
-            ctx.playerController().processRightClick(ctx.player(), ctx.world(), hand);
-            return Status.RUNNING;
-        }
-        if (!terminalOpen()) {
-            if (ticks > OPEN_TIMEOUT_TICKS) {
-                finish();
-                return fail("the terminal didn't open (out of range, or its chunk isn't loaded)");
+        AbstractContainerMenu menu = terminalMenu();
+        if (menu == null) {
+            if (++ticks < OPEN_RETRY_TICKS) {
+                return Status.RUNNING;
             }
-            return Status.RUNNING;
+            if (attempts < OPEN_ATTEMPTS) {
+                return requestOpen();
+            }
+            finish();
+            return fail("the terminal didn't open after " + attempts + " tries (none carried, out of range, or its chunk isn't loaded)");
         }
-        AbstractContainerMenu menu = ctx.player().containerMenu;
         Inventory inv = ctx.player().getInventory();
         for (Slot slot : menu.slots) {
             if (slot.container != inv || slot.getContainerSlot() >= inv.items.size()) {
@@ -183,13 +190,11 @@ final class WirelessTerminalDeposit {
     }
 
     private void finish() {
-        if (terminalOpen()) {
+        BackgroundMenus.close();
+        if (isTerminalMenu(ctx.player().containerMenu)) {
+            // opened with a screen after all (another mod handling the packet first): close that one normally
             ctx.player().closeContainer();
         }
-        if (swappedFrom != -1) {
-            ctx.playerController().windowClick(ctx.player().inventoryMenu.containerId, swappedFrom, previousSelected, ClickType.SWAP, ctx.player());
-        }
-        ctx.player().getInventory().selected = previousSelected;
         state = State.IDLE;
     }
 
@@ -199,8 +204,19 @@ final class WirelessTerminalDeposit {
         return Status.FAILED;
     }
 
-    private boolean terminalOpen() {
-        AbstractContainerMenu menu = ctx.player().containerMenu;
+    /**
+     * @return The open storage terminal menu: normally the one taken in the background, else one opened with a screen
+     */
+    private AbstractContainerMenu terminalMenu() {
+        AbstractContainerMenu background = BackgroundMenus.menu();
+        if (background != null) {
+            return background;
+        }
+        AbstractContainerMenu open = ctx.player().containerMenu;
+        return isTerminalMenu(open) ? open : null;
+    }
+
+    private boolean isTerminalMenu(AbstractContainerMenu menu) {
         return menu != ctx.player().inventoryMenu && menu.getClass().getName().startsWith("com.tom.storagemod.");
     }
 

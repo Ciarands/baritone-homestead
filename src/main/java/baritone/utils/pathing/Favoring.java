@@ -30,9 +30,13 @@ public final class Favoring {
 
     public Favoring(IPlayerContext ctx, IPath previous, CalculationContext context) {
         this(previous, context);
+        // avoidances combine among themselves (strongest wins), then scale the backtrack favoring
+        Long2DoubleOpenHashMap avoidances = new Long2DoubleOpenHashMap();
+        avoidances.defaultReturnValue(1.0D);
         for (Avoidance avoid : Avoidance.create(ctx)) {
-            avoid.applySpherical(favorings);
+            avoid.applySpherical(avoidances);
         }
+        avoidances.long2DoubleEntrySet().fastForEach(e -> favorings.put(e.getLongKey(), favorings.get(e.getLongKey()) * e.getDoubleValue()));
         Helper.HELPER.logDebug("Favoring size: " + favorings.size());
     }
 

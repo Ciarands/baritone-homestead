@@ -46,6 +46,7 @@ public final class CachedChunk {
             Blocks.END_PORTAL,
             Blocks.END_PORTAL_FRAME,
             Blocks.SPAWNER,
+            Blocks.SCULK_SHRIEKER, // Warden summoning: kept track of so mining and paths can stay away
             Blocks.BARRIER,
             Blocks.OBSERVER,
             Blocks.WHITE_SHULKER_BOX,
