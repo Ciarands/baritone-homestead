@@ -33,6 +33,7 @@ import baritone.utils.BlockStateInterface;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.AirBlock;
@@ -83,6 +84,15 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                 cancel();
                 return null;
             }
+        }
+        if (inventoryFull()) {
+            // Nothing mined from here on can be picked up; continuing only chases uncollectable drops in a loop
+            logDirect("Inventory full, no room for " + filter + ". Stopping.");
+            if (Baritone.settings().notificationOnMineFail.value) {
+                logNotification("Inventory full, stopping mining", true);
+            }
+            cancel();
+            return null;
         }
         if (calcFailed) {
             if (!knownOreLocations.isEmpty() && Baritone.settings().blacklistClosestOnFailure.value) {
@@ -343,20 +353,35 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         }
     }
 
+    /**
+     * @return Whether no target drop can be picked up anymore: no empty main slot, and every stack of a target item is full
+     */
+    private boolean inventoryFull() {
+        Inventory inv = ctx.player().getInventory();
+        if (inv.getFreeSlot() != -1) {
+            return false;
+        }
+        return inv.items.stream().noneMatch(stack -> filter.has(stack) && stack.getCount() < stack.getMaxStackSize());
+    }
+
     public List<BlockPos> droppedItemsScan() {
         if (!Baritone.settings().mineScanDroppedItems.value) {
             return Collections.emptyList();
         }
+        Inventory inv = ctx.player().getInventory();
         List<BlockPos> ret = new ArrayList<>();
         for (Entity entity : ((ClientLevel) ctx.world()).entitiesForRendering()) {
             if (entity instanceof ItemEntity) {
                 ItemEntity ei = (ItemEntity) entity;
-                if (filter.has(ei.getItem())) {
+                // Only items there is room for: walking onto a drop that can't be picked up never removes it
+                if (filter.has(ei.getItem()) && (inv.getFreeSlot() != -1 || inv.getSlotWithRemainingSpace(ei.getItem()) != -1)) {
                     ret.add(entity.blockPosition());
                 }
             }
         }
-        ret.addAll(anticipatedDrops.keySet());
+        if (!inventoryFull()) {
+            ret.addAll(anticipatedDrops.keySet());
+        }
         return ret;
     }
 

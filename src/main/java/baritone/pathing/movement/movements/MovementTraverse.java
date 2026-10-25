@@ -53,6 +53,18 @@ public class MovementTraverse extends Movement {
      */
     private boolean wasTheBridgeBlockAlwaysThere = true;
 
+    /**
+     * Consecutive ticks spent at a different height than the destination
+     */
+    private int wrongYTicks;
+
+    /**
+     * Ticks at the wrong height before giving up on this movement so a new path is planned from where we actually are.
+     * Without this the movement just stands still until movementTimeoutTicks runs out (common in geodes, where blocks
+     * fall or partial blocks move the player up or down a level).
+     */
+    private static final int WRONG_Y_GIVE_UP_TICKS = 8;
+
     public MovementTraverse(IBaritone baritone, BetterBlockPos from, BetterBlockPos to) {
         super(baritone, from, to, new BetterBlockPos[]{to.above(), to}, to.below());
     }
@@ -61,6 +73,7 @@ public class MovementTraverse extends Movement {
     public void reset() {
         super.reset();
         wasTheBridgeBlockAlwaysThere = true;
+        wrongYTicks = 0;
     }
 
     @Override
@@ -242,12 +255,20 @@ public class MovementTraverse extends Movement {
         BlockPos feet = ctx.playerFeet();
         if (feet.getY() != dest.getY() && !ladder) {
             logDebug("Wrong Y coordinate");
+            if (++wrongYTicks > WRONG_Y_GIVE_UP_TICKS) {
+                return state.setStatus(MovementStatus.UNREACHABLE);
+            }
             if (feet.getY() < dest.getY()) {
-                System.out.println("In movement traverse");
                 return state.setInput(Input.JUMP, true);
+            }
+            // One block above the destination: keep walking and drop down onto it
+            if (feet.getY() == dest.getY() + 1 && ctx.player().onGround()) {
+                MovementHelper.moveTowards(ctx, state, dest);
+                return state.setInput(Input.MOVE_FORWARD, true);
             }
             return state;
         }
+        wrongYTicks = 0;
 
         if (isTheBridgeBlockThere) {
             if (feet.equals(dest)) {
