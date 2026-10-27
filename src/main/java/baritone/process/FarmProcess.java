@@ -30,6 +30,7 @@ import baritone.api.utils.BetterBlockPos;
 import baritone.api.utils.RayTraceUtils;
 import baritone.api.utils.Rotation;
 import baritone.api.utils.RotationUtils;
+import baritone.api.utils.SettingsUtil;
 import baritone.api.utils.input.Input;
 import baritone.pathing.movement.MovementHelper;
 import baritone.utils.BaritoneProcessHelper;
@@ -356,7 +357,7 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
 
         List<Goal> goalz = new ArrayList<>();
         for (BlockPos pos : toBreak) {
-            goalz.add(new BuilderProcess.GoalBreak(pos));
+            goalz.add(new GoalBreak(pos));
         }
         if (baritone.getInventoryBehavior().throwaway(false, this::isPlantable)) {
             for (BlockPos pos : openFarmland) {
@@ -413,5 +414,26 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
     @Override
     public String displayName0() {
         return "Farming";
+    }
+
+    /**
+     * Next to a block, to break it: anywhere adjacent, inside or below, but not right on top of it (it might not hold
+     * us up, and then can't be broken)
+     */
+    private static final class GoalBreak extends GoalGetToBlock {
+
+        GoalBreak(BlockPos pos) {
+            super(pos);
+        }
+
+        @Override
+        public boolean isInGoal(int x, int y, int z) {
+            return y <= this.y && super.isInGoal(x, y, z);
+        }
+
+        @Override
+        public String toString() {
+            return String.format("GoalBreak{x=%s,y=%s,z=%s}", SettingsUtil.maybeCensor(x), SettingsUtil.maybeCensor(y), SettingsUtil.maybeCensor(z));
+        }
     }
 }

@@ -25,6 +25,9 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.SlabBlock;
+import net.minecraft.world.level.block.StairBlock;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.Half;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -73,7 +76,9 @@ public interface IPlayerContext {
         // this does not impact performance at all since we're not null checking constantly
         // if there is an exception, the only overhead is Java generating the exception object... so we can ignore it
         try {
-            if (world().getBlockState(feet).getBlock() instanceof SlabBlock) {
+            BlockState state = world().getBlockState(feet);
+            // standing on the low step of a stair is standing on it, like on a slab
+            if (state.getBlock() instanceof SlabBlock || (state.getBlock() instanceof StairBlock && state.getValue(StairBlock.HALF) == Half.BOTTOM)) {
                 return feet.above();
             }
         } catch (NullPointerException ignored) {}

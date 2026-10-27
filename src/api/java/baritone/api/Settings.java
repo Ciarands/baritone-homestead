@@ -326,6 +326,19 @@ public final class Settings {
     public final Setting<Boolean> buildIgnoreDirection = new Setting<>(false);
 
     /**
+     * Write what the builder plans and does each tick, and why, to baritone/builder.log (started over with each
+     * build). Lines repeated tick after tick are written once with a count. For working out why a build gets stuck.
+     */
+    public final Setting<Boolean> buildDebugLog = new Setting<>(true);
+
+    /**
+     * Don't build: plan the whole build as if every step worked, write the plan to baritone/build-plan.txt (each
+     * step, where it's done from, and a map of each layer as it would end up) and stop. For seeing what a build would
+     * do, and what it couldn't, before doing it.
+     */
+    public final Setting<Boolean> buildPlanOnly = new Setting<>(false);
+
+    /**
      * A list of names of block properties the builder will ignore.
      */
     public final Setting<List<String>> buildIgnoreProperties = new Setting<>(new ArrayList<>(Arrays.asList(
@@ -1013,34 +1026,6 @@ public final class Settings {
     public final Setting<Boolean> extendCacheOnThreshold = new Setting<>(false);
 
     /**
-     * Don't consider the next layer in builder until the current one is done
-     */
-    public final Setting<Boolean> buildInLayers = new Setting<>(false);
-
-    /**
-     * false = build from bottom to top
-     * <p>
-     * true = build from top to bottom
-     */
-    public final Setting<Boolean> layerOrder = new Setting<>(false);
-
-    /**
-     * How high should the individual layers be?
-     */
-    public final Setting<Integer> layerHeight = new Setting<>(1);
-
-    /**
-     * Start building the schematic at a specific layer.
-     * Can help on larger builds when schematic wants to break things its already built
-     */
-    public final Setting<Integer> startAtLayer = new Setting<>(0);
-
-    /**
-     * If a layer is unable to be constructed, just skip it.
-     */
-    public final Setting<Boolean> skipFailedLayers = new Setting<>(false);
-
-    /**
      * Only build the selected part of schematics
      */
     public final Setting<Boolean> buildOnlySelection = new Setting<>(false);
@@ -1056,27 +1041,6 @@ public final class Settings {
     public final Setting<Integer> buildRepeatCount = new Setting<>(-1);
 
     /**
-     * Don't notify schematics that they are moved.
-     * e.g. replacing will replace the same spots for every repetition
-     * Mainly for backward compatibility.
-     */
-    public final Setting<Boolean> buildRepeatSneaky = new Setting<>(true);
-
-    /**
-     * Allow standing above a block while mining it, in BuilderProcess
-     * <p>
-     * Experimental
-     */
-    public final Setting<Boolean> breakFromAbove = new Setting<>(false);
-
-    /**
-     * As well as breaking from above, set a goal to up and to the side of all blocks to break.
-     * <p>
-     * Never turn this on without also turning on breakFromAbove.
-     */
-    public final Setting<Boolean> goalBreakFromAbove = new Setting<>(false);
-
-    /**
      * Build in map art mode, which makes baritone only care about the top block in each column
      */
     public final Setting<Boolean> mapArtMode = new Setting<>(false);
@@ -1085,16 +1049,6 @@ public final class Settings {
      * Override builder's behavior to not attempt to correct blocks that are currently water
      */
     public final Setting<Boolean> okIfWater = new Setting<>(false);
-
-    /**
-     * The set of incorrect blocks can never grow beyond this size
-     */
-    public final Setting<Integer> incorrectSize = new Setting<>(100);
-
-    /**
-     * Multiply the cost of breaking a block that's correct in the builder's schematic by this coefficient
-     */
-    public final Setting<Double> breakCorrectBlockPenaltyMultiplier = new Setting<>(10d);
 
     /**
      * Multiply the cost of placing a block that's incorrect in the builder's schematic by this coefficient

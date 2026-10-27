@@ -43,6 +43,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.LinkedBlockingQueue;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.phys.AABB;
 
 public final class PathingBehavior extends Behavior implements IPathingBehavior, Helper {
 
@@ -431,6 +432,20 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
      */
     public BetterBlockPos pathStart() { // TODO move to a helper or util class
         BetterBlockPos feet = ctx.playerFeet();
+        if (!MovementHelper.canWalkThrough(ctx, feet) || !MovementHelper.canWalkThrough(ctx, feet.above())) {
+            // partly inside something thin (a fence gate, a door, a trapdoor) with the rest of us next to it: starting
+            // from in there, no movement works. Start from where the rest of us is.
+            AABB box = ctx.player().getBoundingBox();
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BetterBlockPos possible = new BetterBlockPos(feet.x + dx, feet.y, feet.z + dz);
+                    if ((dx != 0 || dz != 0) && box.maxX > possible.x && box.minX < possible.x + 1 && box.maxZ > possible.z && box.minZ < possible.z + 1
+                            && MovementHelper.canWalkOn(ctx, possible.below()) && MovementHelper.canWalkThrough(ctx, possible) && MovementHelper.canWalkThrough(ctx, possible.above())) {
+                        return possible;
+                    }
+                }
+            }
+        }
         if (!MovementHelper.canWalkOn(ctx, feet.below())) {
             if (ctx.player().onGround()) {
                 double playerX = ctx.player().position().x;
