@@ -171,7 +171,10 @@ public final class BuildPlanner {
     }
 
     private static final int MAX_PILLAR = 8;
-    private static final int LOOKAHEAD = 16;
+    /**
+     * Steps ahead looked at when choosing where to stand: the more of them a stand reaches, the fewer stands
+     */
+    private static final int LOOKAHEAD = 48;
 
     private final IPlayerContext ctx;
     private final ISchematic schematic;
@@ -704,9 +707,15 @@ public final class BuildPlanner {
                 }
                 BlockPos next = planPlace(world, plan, pos, at, upcoming(todo, pos), why);
                 if (next != null) {
+                    boolean moved = !next.equals(at);
                     at = next;
                     it.remove();
                     progress = true;
+                    if (moved) {
+                        // somewhere new: everything else that can be done from here first, then on
+                        serveFrom(world, plan, todo, at, why, waitedFor);
+                        break;
+                    }
                 }
             }
         }
@@ -728,10 +737,45 @@ public final class BuildPlanner {
     }
 
     /**
+     * Whether stands are only looked for where the player already is (see serveFrom)
+     */
+    private boolean hereOnly;
+
+    /**
      * Whether what's being planned can as well wait (taking away what's no longer needed, while building): then only
      * stands the walking model reaches are used, never one it doubts
      */
     private boolean optional;
+
+    /**
+     * Plans everything in {@code todo} that can be done from {@code at}, without moving: walking is most of the time
+     * a build takes, so each stand does all it can before the next
+     */
+    private void serveFrom(VirtualWorld world, Plan plan, List<BlockPos> todo, BlockPos at, Map<BlockPos, String> why, Set<BlockPos> waitedFor) {
+        Vec3 eye = PlacementModel.eye(at);
+        hereOnly = true;
+        try {
+            boolean any = true;
+            while (any) { // (one placed can be what the next is placed against)
+                any = false;
+                for (Iterator<BlockPos> it = todo.iterator(); it.hasNext(); ) {
+                    BlockPos pos = it.next();
+                    if (eye.distanceTo(Vec3.atCenterOf(pos)) > PlacementModel.REACH + 1) {
+                        continue; // nothing next to it in reach either
+                    }
+                    if (waitedFor.add(pos) && spoils(world, pos, todo) != null) {
+                        continue;
+                    }
+                    if (planPlace(world, plan, pos, at, Collections.emptyList(), why) != null) {
+                        it.remove();
+                        any = true;
+                    }
+                }
+            }
+        } finally {
+            hereOnly = false;
+        }
+    }
 
     private static List<BlockPos> upcoming(List<BlockPos> todo, BlockPos pos) {
         int i = todo.indexOf(pos);
@@ -1374,6 +1418,9 @@ public final class BuildPlanner {
             if (here != null) {
                 return here;
             }
+        }
+        if (hereOnly) {
+            return null;
         }
         List<Choice> candidates = new ArrayList<>();
         Map<Choice, Double> scores = new HashMap<>();
