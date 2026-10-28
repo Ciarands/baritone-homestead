@@ -97,6 +97,11 @@ public final class BuildExecutor {
     private static final int TURN_TICKS = 20;
     private static final int BREAK_TICKS = 300;
     private static final int MOVE_STALL_TICKS = 400;
+    /**
+     * Not moving at all for this long while pathing, and not mining the way through either: stuck in place (walking
+     * into the edge of a slab or stair over and over), however far the stand
+     */
+    private static final int STUCK_TICKS = 100;
     private static final int STALL_TICKS = 1200;
     private static final int MAX_PLANS_WITHOUT_PROGRESS = 4;
     private static final int LITTER_MARGIN = 4;
@@ -120,6 +125,9 @@ public final class BuildExecutor {
     private BlockPos movingTo;
     private double closest;
     private long closestTick;
+    private Vec3 stillAt;
+    private long stillSince;
+    private long lastMoveTick;
     private int failedCalcs;
     /**
      * Stands not got to, one after the other, with nothing done in between
@@ -487,6 +495,7 @@ public final class BuildExecutor {
             movingTo = stand;
             closest = distance;
             closestTick = now;
+            stillAt = null;
             failedCalcs = 0;
             log.event("going to " + p(stand) + " (" + stage.how + ") for " + (stage.steps.size() - stepIndex) + " steps, first " + current() + " (from here: " + notHere + ")");
         }
@@ -494,17 +503,26 @@ public final class BuildExecutor {
             closest = distance;
             closestTick = now;
         }
+        Vec3 position = ctx.player().position();
+        // standing still to do something on the way doesn't count: only ticks spent moving
+        if (stillAt == null || now - lastMoveTick > 1 || position.distanceTo(stillAt) > 0.5 || !ctx.playerController().hasBrokenBlock()) {
+            stillAt = position;
+            stillSince = now;
+        }
+        lastMoveTick = now;
         if (calcFailed) {
             failedCalcs++;
         }
-        if (failedCalcs >= 2 || now - closestTick > MOVE_STALL_TICKS) {
+        boolean stuck = now - stillSince > STUCK_TICKS;
+        if (failedCalcs >= 2 || now - closestTick > MOVE_STALL_TICKS || stuck) {
             planner.badStand(stand);
             if (++unreachedInARow >= MAX_UNREACHED_IN_A_ROW && !planner.isReachStrict()) {
                 log.event("WATCHDOG: " + unreachedInARow + " stands in a row not got to: from now on only stands that can be walked, climbed or dropped to");
                 planner.reachUnreliable();
             }
             log.event("can't get to " + p(stand) + "; around the player:\n" + surroundings());
-            replan("can't get to " + p(stand) + (failedCalcs >= 2 ? ": no path" : ": no closer for " + (now - closestTick) + " ticks"));
+            replan("can't get to " + p(stand) + (failedCalcs >= 2 ? ": no path"
+                    : stuck ? ": stuck in place for " + (now - stillSince) + " ticks" : ": no closer for " + (now - closestTick) + " ticks"));
             return pause("no way to the stand");
         }
         if (pathContext == null || now - pathContextTick > 100 || !stand.equals(pathContextStand)) {
