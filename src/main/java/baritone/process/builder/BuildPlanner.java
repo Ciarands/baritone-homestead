@@ -517,7 +517,7 @@ public final class BuildPlanner {
             front = origin.getY() + y;
             Plan plan;
             try {
-                plan = planLayer(world, from, front);
+                plan = planLayer(world, from, front, litter);
             } finally {
                 front = NO_FRONT;
             }
@@ -657,7 +657,7 @@ public final class BuildPlanner {
         return plan;
     }
 
-    private Plan planLayer(VirtualWorld world, BlockPos from, int y) {
+    private Plan planLayer(VirtualWorld world, BlockPos from, int y, Collection<BlockPos> litter) {
         Plan plan = new Plan("layer", y);
         List<BlockPos> todo = new ArrayList<>();
         for (BlockPos pos : layer(y)) {
@@ -719,11 +719,19 @@ public final class BuildPlanner {
                 it.remove();
             }
         }
+        // with the layer done, what's no longer needed well below it goes, while it can still be got to
+        at = planCleanupBelow(world, plan, at, y, litter);
         for (BlockPos pos : todo) {
             plan.waiting.put(pos, why.getOrDefault(pos, "?"));
         }
         return plan;
     }
+
+    /**
+     * Whether what's being planned can as well wait (taking away what's no longer needed, while building): then only
+     * stands the walking model reaches are used, never one it doubts
+     */
+    private boolean optional;
 
     private static List<BlockPos> upcoming(List<BlockPos> todo, BlockPos pos) {
         int i = todo.indexOf(pos);
@@ -807,7 +815,65 @@ public final class BuildPlanner {
 
     private Plan planCleanup(VirtualWorld world, BlockPos from, Collection<BlockPos> litter) {
         Plan plan = new Plan("cleanup", Integer.MIN_VALUE);
-        Set<BlockPos> todo = new TreeSet<>(Comparator.comparingInt((BlockPos b) -> -b.getY()).thenComparingInt(BlockPos::getX).thenComparingInt(BlockPos::getZ));
+        planRemovals(world, plan, cleanupTargets(world, litter), from, true);
+        return plan;
+    }
+
+    /**
+     * Layers this far below the one being built aren't needed any more: stands for a layer are no more than four
+     * below it, so what holds them up is no more than five below
+     */
+    private static final int STALE_DEPTH = 6;
+
+    /**
+     * Takes away what's no longer needed well below the layer being built (temporary blocks, what the pathfinder put
+     * down, anything where the build wants nothing) while it can still be got to: once the build closes a room off
+     * (a roof on, iron doors in), what was left inside stays there. What the pathfinder put down is taken away once
+     * only: if it puts something there again it still needs it to get about, and that's for the cleanup at the end
+     */
+    private BlockPos planCleanupBelow(VirtualWorld world, Plan plan, BlockPos at, int layer, Collection<BlockPos> litter) {
+        for (BlockPos pos : selectedToGo) {
+            BlockState state = world.get(pos);
+            if (state.getBlock() instanceof AirBlock || state.getBlock() instanceof LiquidBlock) {
+                gone.add(pos);
+            }
+        }
+        List<BlockPos> stale = new ArrayList<>();
+        for (BlockPos pos : cleanupTargets(world, litter)) {
+            // seen gone and here again: put back to get about with
+            if (pos.getY() <= layer - STALE_DEPTH && (temporary.contains(pos) || !gone.contains(pos))) {
+                stale.add(pos);
+                selectedToGo.add(pos.immutable());
+            }
+        }
+        Set<BlockPos> waitingBefore = new HashSet<>(plan.waiting.keySet());
+        BlockPos stood;
+        optional = true;
+        try {
+            stood = planRemovals(world, plan, stale, at, false);
+        } finally {
+            optional = false;
+        }
+        // what can't be taken away yet isn't something the layer waits for: the final cleanup tries it again
+        plan.waiting.keySet().removeIf(pos -> !waitingBefore.contains(pos) && pos.getY() <= layer - STALE_DEPTH);
+        return stood;
+    }
+
+    /**
+     * Cells the cleanup while building has planned to take away, and those of them seen gone since
+     */
+    private final Set<BlockPos> selectedToGo = new HashSet<>();
+    private final Set<BlockPos> gone = new HashSet<>();
+
+    private static final Comparator<BlockPos> TOP_DOWN = Comparator.comparingInt((BlockPos b) -> -b.getY())
+            .thenComparingInt(BlockPos::getX).thenComparingInt(BlockPos::getZ);
+
+    /**
+     * @return What's to be taken away, top down: temporary blocks, litter about the build, and anything where the
+     * build wants nothing
+     */
+    private List<BlockPos> cleanupTargets(VirtualWorld world, Collection<BlockPos> litter) {
+        Set<BlockPos> todo = new TreeSet<>(TOP_DOWN);
         todo.addAll(temporary);
         todo.addAll(litter);
         for (BlockPos pos : box(true)) {
@@ -817,8 +883,16 @@ public final class BuildPlanner {
                 todo.add(pos);
             }
         }
-        List<BlockPos> ordered = new ArrayList<>(todo);
-        BlockPos at = from;
+        return new ArrayList<>(todo);
+    }
+
+    /**
+     * Plans breaking what's in {@code ordered} that can go: not what holds back liquid or holds up part of the build
+     * (left in place and said, on the {@code last} pass)
+     *
+     * @return Where the player stands after
+     */
+    private BlockPos planRemovals(VirtualWorld world, Plan plan, List<BlockPos> ordered, BlockPos at, boolean last) {
         for (int i = 0; i < ordered.size(); i++) {
             BlockPos pos = ordered.get(i);
             BlockState current = world.get(pos);
@@ -832,17 +906,21 @@ public final class BuildPlanner {
                 continue;
             }
             if (nextToLiquid(world, pos)) {
-                unbuildable.put(pos, "left in place: holds back liquid");
+                if (last) {
+                    unbuildable.put(pos, "left in place: holds back liquid");
+                }
                 continue;
             }
             BlockPos held = holdsUp(world, pos);
             if (held != null) {
-                unbuildable.put(pos, "left in place: holds up " + held.toShortString());
+                if (last) {
+                    unbuildable.put(pos, "left in place: holds up " + held.toShortString());
+                }
                 continue;
             }
             at = planBreak(world, plan, pos, at, ordered.subList(i + 1, Math.min(ordered.size(), i + 1 + LOOKAHEAD)));
         }
-        return plan;
+        return at;
     }
 
     // ---- steps
@@ -1313,7 +1391,7 @@ public final class BuildPlanner {
                     }
                     double score = cost(choice) - 3 * coverage(feet, upcoming) + (at == null ? 0 : distance(at, feet));
                     if (!reachableStand(feet, choice.how)) {
-                        if (trustReach) {
+                        if (trustReach || optional) {
                             continue;
                         }
                         score += UNREACHABLE_PENALTY;
