@@ -335,16 +335,25 @@ public final class BuildPlanner {
      * @return Whether the player's body can be in {@code pos}: open, or something the pathfinder may break there
      */
     private boolean clearable(VirtualWorld world, BlockPos pos) {
-        if (passable(world, pos)) {
-            return true;
-        }
+        return passable(world, pos) || mayBreak(world, pos);
+    }
+
+    /**
+     * @return Whether the pathfinder may break what's at {@code pos}, by the same rules as {@link BuildPathContext}:
+     * not what's right (or only to be finished), nor the ground something of the build stands on
+     */
+    private boolean mayBreak(VirtualWorld world, BlockPos pos) {
         BlockState state = world.get(pos);
         if (!Baritone.settings().allowBreak.value || !state.getFluidState().isEmpty() || state.getDestroySpeed(world.level(), pos) < 0
                 || MovementHelper.avoidBreaking(world, pos.getX(), pos.getY(), pos.getZ(), state)) {
             return false;
         }
         BlockState desired = desired(world, pos);
-        return desired == null || desired.getBlock() instanceof AirBlock
+        if (desired == null) {
+            BlockState above = desired(world, pos.above());
+            return above == null || above.getBlock() instanceof AirBlock;
+        }
+        return desired.getBlock() instanceof AirBlock
                 || !(BlockRules.valid(state, desired, false) || BlockRules.completable(state, desired));
     }
 
@@ -1322,12 +1331,8 @@ public final class BuildPlanner {
                 if (MovementHelper.canWalkThrough(world, cell.getX(), cell.getY(), cell.getZ())) {
                     continue;
                 }
-                BlockState state = world.get(cell);
-                BlockState desired = desired(world, cell);
-                if (!state.getFluidState().isEmpty() || state.getDestroySpeed(world.level(), cell) < 0 || nextToLiquid(world, cell)
-                        || (desired != null && !(desired.getBlock() instanceof AirBlock)
-                        && (BlockRules.valid(state, desired, false) || BlockRules.completable(state, desired)))) {
-                    return null; // can't, or shouldn't: part of the build
+                if (nextToLiquid(world, cell) || !mayBreak(world, cell)) {
+                    return null; // can't, or shouldn't: part of the build, or what it stands on
                 }
                 dig++;
             }
