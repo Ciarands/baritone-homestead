@@ -34,6 +34,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.*;
+import java.util.function.Predicate;
 
 /**
  * Works out what to do, in what order and from where, against a {@link VirtualWorld}: each step is checked with the
@@ -275,26 +276,46 @@ public final class BuildPlanner {
 
     private void computeReachable(VirtualWorld world, BlockPos from) {
         reachable = new LongOpenHashSet();
+        flood(world, from, reachable, null, Integer.MAX_VALUE);
+    }
+
+    /**
+     * Follows the walking model out from {@code from}, within the build and a margin round it, into {@code seen}
+     *
+     * @param goal Stops at the first place it accepts; null to go on until there's nowhere more
+     * @param cap  Stops when this many places are reached
+     * @return Whether it stopped at a goal or the cap, rather than running out of places
+     */
+    private boolean flood(VirtualWorld world, BlockPos from, LongOpenHashSet seen, Predicate<BlockPos> goal, int cap) {
         int minX = origin.getX() - REACH_MARGIN, maxX = origin.getX() + schematic.widthX() + REACH_MARGIN;
         int minY = origin.getY() - REACH_MARGIN, maxY = origin.getY() + schematic.heightY() + REACH_MARGIN;
         int minZ = origin.getZ() - REACH_MARGIN, maxZ = origin.getZ() + schematic.lengthZ() + REACH_MARGIN;
         ArrayDeque<BlockPos> queue = new ArrayDeque<>();
         for (BlockPos seed : new BlockPos[]{from, from.above(), from.below()}) {
             // where the player is counts, standable as the model sees it or not (mid-step, on something odd)
-            if ((seed == from || standable(world, seed)) && reachable.add(seed.asLong())) {
+            if ((seed == from || standable(world, seed)) && seen.add(seed.asLong())) {
+                if (goal != null && goal.test(seed)) {
+                    return true;
+                }
                 queue.add(seed);
             }
         }
         while (!queue.isEmpty()) {
+            if (seen.size() >= cap) {
+                return true;
+            }
             BlockPos n = queue.poll();
             List<BlockPos> next = new ArrayList<>();
             boolean headroom = clearable(world, n.above(2));
             // up: climbing, or pillaring, which puts a block where the feet were (stone that was dug through to get
             // here is gone by then, it doesn't hold anyone up)
             BlockPos up = n.above();
-            if (headroom && inBox(up, minX, maxX, minY, maxY, minZ, maxZ) && !reachable.contains(up.asLong())
+            if (headroom && inBox(up, minX, maxX, minY, maxY, minZ, maxZ) && !seen.contains(up.asLong())
                     && clearable(world, up) && (climbable(world, n) || climbable(world, up) || (!strictReach && mayPlace(world, n, true)))) {
-                reachable.add(up.asLong());
+                seen.add(up.asLong());
+                if (goal != null && goal.test(up)) {
+                    return true;
+                }
                 queue.add(up);
             }
             next.add(n.below()); // climbing down, or digging down
@@ -315,12 +336,41 @@ public final class BuildPlanner {
                 if (!inBox(t, minX, maxX, minY, maxY, minZ, maxZ)) {
                     continue;
                 }
-                if (!reachable.contains(t.asLong()) && standable(world, t)) {
-                    reachable.add(t.asLong());
+                if (!seen.contains(t.asLong()) && standable(world, t)) {
+                    seen.add(t.asLong());
+                    if (goal != null && goal.test(t)) {
+                        return true;
+                    }
                     queue.add(t);
                 }
             }
         }
+        return false;
+    }
+
+    /**
+     * Places looked through for the way back before taking it there is one: that much room (the inside of a big
+     * building) is no trap, and looking further would cost too much for every block placed
+     */
+    private static final int WAY_OUT_CAP = 1500;
+
+    /**
+     * Where the player was when this plan was made
+     */
+    private BlockPos planFrom;
+
+    /**
+     * @return Whether the player at {@code stand} can still get back to where it was when the plan was made, or out of
+     * the build's footprint, as the walking model sees it (or has a lot of room). Placing from a stand can shut the
+     * player in (the last wall of a room put up from inside it, a flower bed's ends), and a stand only dropped into
+     * can't be left at all; either way the rest of the build is cut off. Where the player already is counts as the
+     * way back, so working on in a place it can't leave (the top of a tower it pillared up) goes on
+     */
+    private boolean canLeave(VirtualWorld world, BlockPos stand) {
+        int minX = origin.getX(), maxX = origin.getX() + schematic.widthX() - 1;
+        int minZ = origin.getZ(), maxZ = origin.getZ() + schematic.lengthZ() - 1;
+        return flood(world, stand, new LongOpenHashSet(), p -> p.distManhattan(planFrom) <= 1
+                || p.getX() < minX || p.getX() > maxX || p.getZ() < minZ || p.getZ() > maxZ, WAY_OUT_CAP);
     }
 
     private boolean passable(VirtualWorld world, BlockPos pos) {
@@ -452,6 +502,8 @@ public final class BuildPlanner {
 
     private Plan plan(VirtualWorld world, BlockPos from, Collection<BlockPos> litter) {
         computeReachable(world, from);
+        leavable.clear();
+        planFrom = from.immutable();
         if (!cleared) {
             Plan plan = planClearing(world, from);
             if (!plan.isEmpty()) {
@@ -462,7 +514,13 @@ public final class BuildPlanner {
         // the lowest layer with anything that can be done, with whatever is still waiting below it retried first
         Map<BlockPos, String> stillWaiting = new LinkedHashMap<>();
         for (int y = 0; y < schematic.heightY(); y++) {
-            Plan plan = planLayer(world, from, origin.getY() + y);
+            front = origin.getY() + y;
+            Plan plan;
+            try {
+                plan = planLayer(world, from, front);
+            } finally {
+                front = NO_FRONT;
+            }
             if (!plan.isEmpty()) {
                 plan.waiting.putAll(stillWaiting);
                 return plan;
@@ -904,6 +962,11 @@ public final class BuildPlanner {
     }
 
     /**
+     * Stands tried for a block that would shut the player in before it waits
+     */
+    private static final int MAX_SHUT_IN_TRIES = 4;
+
+    /**
      * @return Where the player stands after, or null if it can't be placed now
      */
     private BlockPos planPlace(VirtualWorld world, Plan plan, BlockPos pos, BlockPos at, List<BlockPos> upcoming, Map<BlockPos, String> why) {
@@ -942,13 +1005,27 @@ public final class BuildPlanner {
         apply(world, pos, options.get(0));
         List<BlockPos> fills = world.changedSince(mark);
         world.revert(mark);
-        Choice choice = choose(world, pos, options, fills, upcoming, at);
-        if (choice == null) {
-            why.put(pos, "nowhere to stand in reach of what it's placed against");
-            return null;
+        Choice choice;
+        for (int tries = 0; ; tries++) {
+            int before = world.mark();
+            choice = choose(world, pos, options, fills, upcoming, at);
+            if (choice == null) {
+                why.put(pos, tries == 0 ? "nowhere to stand in reach of what it's placed against" : "it would shut the player in from wherever it's placed");
+                return null;
+            }
+            apply(world, pos, choice.option);
+            if (canLeave(world, choice.stand)) {
+                break;
+            }
+            // placed from there, it would leave the player no way out: from somewhere else
+            world.revert(before);
+            badStandFor(pos, choice.stand);
+            if (tries == MAX_SHUT_IN_TRIES) {
+                why.put(pos, "it would shut the player in from wherever it's placed");
+                return null;
+            }
         }
         stage(plan, choice).steps.add(new Step(Kind.PLACE, pos, choice.option.result, choice.option, false, fills));
-        apply(world, pos, choice.option);
         if (BlockRules.needsSecondSlab(world.get(pos), desired)) {
             BlockPos stood = planFinish(world, plan, pos, world.get(pos), desired, choice.stand, upcoming, why);
             return stood != null ? stood : choice.stand;
@@ -1220,8 +1297,8 @@ public final class BuildPlanner {
                 return here;
             }
         }
-        Choice best = null;
-        double bestScore = Double.MAX_VALUE;
+        List<Choice> candidates = new ArrayList<>();
+        Map<Choice, Double> scores = new HashMap<>();
         int reach = (int) Math.ceil(PlacementModel.REACH);
         for (int dy = -reach - 1; dy <= reach - 1; dy++) {
             for (int dx = -reach; dx <= reach; dx++) {
@@ -1241,18 +1318,29 @@ public final class BuildPlanner {
                         }
                         score += UNREACHABLE_PENALTY;
                     }
-                    if (score < bestScore) {
-                        bestScore = score;
-                        best = choice;
-                    }
+                    candidates.add(choice);
+                    scores.put(choice, score);
                 }
             }
         }
-        if (best != null) {
-            commit(world, best);
+        candidates.sort(Comparator.comparingDouble(scores::get));
+        // the best one the player can get away from again: one only dropped into (a room with its walls up, a pit) is
+        // got to and then left with nowhere more to go
+        for (Choice choice : candidates) {
+            int mark = world.mark();
+            commit(world, choice);
+            if (leavable.computeIfAbsent(choice.stand, stand -> canLeave(world, stand))) {
+                return choice;
+            }
+            world.revert(mark);
         }
-        return best;
+        return null;
     }
+
+    /**
+     * Stands found to be ones the player could or couldn't get away from, this plan
+     */
+    private final Map<BlockPos, Boolean> leavable = new HashMap<>();
 
     private static double distance(BlockPos a, BlockPos b) {
         return Math.abs(a.getX() - b.getX()) + Math.abs(a.getY() - b.getY()) + Math.abs(a.getZ() - b.getZ());
@@ -1286,9 +1374,31 @@ public final class BuildPlanner {
         badStandsFor.computeIfAbsent(target.immutable(), k -> new HashSet<>()).add(stand.immutable());
     }
 
+    private static final int NO_FRONT = Integer.MIN_VALUE;
+
+    /**
+     * The layer being built, if one is
+     */
+    private int front = NO_FRONT;
+
+    /**
+     * @return Whether the player in {@code cell} would be in a hole in what's being built: a cell wanted solid at or
+     * below the layer being built and not yet filled. Standing there, the build closes in round the player, and with
+     * what's built not to be broken nor the cell built over, there's no way out
+     */
+    private boolean inAHole(VirtualWorld world, BlockPos cell) {
+        if (front == NO_FRONT || cell.getY() > front) {
+            return false;
+        }
+        BlockState desired = desired(world, cell);
+        return desired != null && !desired.getCollisionShape(world.level(), cell).isEmpty()
+                && !BlockRules.valid(world.get(cell), desired, false);
+    }
+
     private Choice tryStand(VirtualWorld world, BlockPos feet, BlockPos target, List<PlacementModel.Option> options, Collection<BlockPos> fills, boolean prepare) {
         if (badStands.contains(feet) || badStandsFor.getOrDefault(target, Collections.emptySet()).contains(feet)
-                || fills.contains(feet) || fills.contains(feet.above()) || target.equals(feet.below())) {
+                || fills.contains(feet) || fills.contains(feet.above()) || target.equals(feet.below())
+                || inAHole(world, feet) || inAHole(world, feet.above())) {
             return null;
         }
         PlacementModel.Option option = null;

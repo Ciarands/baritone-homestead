@@ -465,7 +465,23 @@ public final class BuildExecutor {
         if (step.kind == BuildPlanner.Kind.BREAK && onlySupport(step.pos)) {
             return "standing on it";
         }
+        // the planner made sure placing from the planned stand leaves a way out from there; anywhere else (passing by
+        // on the way) it could close off the way on, so only what's further off is done in passing
+        BlockPos feet = ctx.playerFeet();
+        if ((step.kind == BuildPlanner.Kind.PLACE || step.kind == BuildPlanner.Kind.FINISH)
+                && !feet.equals(plan.stages.get(stageIndex).stand) && closeTo(feet, step.pos)) {
+            return "next to us, and this isn't the planned stand";
+        }
         return null;
+    }
+
+    /**
+     * @return Whether placing at {@code pos} could close off the way on from {@code feet}: next to the player's body or
+     * below it
+     */
+    private static boolean closeTo(BlockPos feet, BlockPos pos) {
+        return Math.abs(pos.getX() - feet.getX()) <= 2 && Math.abs(pos.getZ() - feet.getZ()) <= 2
+                && pos.getY() >= feet.getY() - 3 && pos.getY() <= feet.getY() + 2;
     }
 
     /**
