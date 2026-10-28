@@ -40,6 +40,8 @@ import net.minecraft.world.InteractionResult;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.AirBlock;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
@@ -497,6 +499,7 @@ public final class BuildExecutor {
                 log.event("WATCHDOG: " + unreachedInARow + " stands in a row not got to: from now on only stands that can be walked, climbed or dropped to");
                 planner.reachUnreliable();
             }
+            log.event("can't get to " + p(stand) + "; around the player:\n" + surroundings());
             replan("can't get to " + p(stand) + (failedCalcs >= 2 ? ": no path" : ": no closer for " + (now - closestTick) + " ticks"));
             return pause("no way to the stand");
         }
@@ -1172,5 +1175,30 @@ public final class BuildExecutor {
 
     static String s(BlockState state) {
         return state == null ? "nothing" : state.toString().replace("Block{minecraft:", "").replace("}", "");
+    }
+
+    /**
+     * @return The blocks round the player, a layer at a time from below the feet up (x across, z down, '@' the feet),
+     * for working out from the log why it couldn't get anywhere
+     */
+    private String surroundings() {
+        BlockPos feet = ctx.playerFeet();
+        Map<Block, Character> legend = new LinkedHashMap<>();
+        StringBuilder out = new StringBuilder();
+        for (int dy = -3; dy <= 2; dy++) {
+            out.append("  y=").append(feet.getY() + dy).append('\n');
+            for (int dz = -2; dz <= 2; dz++) {
+                out.append("    ");
+                for (int dx = -2; dx <= 2; dx++) {
+                    BlockPos pos = feet.offset(dx, dy, dz);
+                    Block block = ctx.world().getBlockState(pos).getBlock();
+                    char c = block instanceof AirBlock ? '.' : legend.computeIfAbsent(block, b -> (char) ('a' + legend.size()));
+                    out.append(dx == 0 && dy == 0 && dz == 0 ? '@' : c);
+                }
+                out.append('\n');
+            }
+        }
+        legend.forEach((block, c) -> out.append("  ").append(c).append(' ').append(block.getName().getString()).append('\n'));
+        return out.toString();
     }
 }

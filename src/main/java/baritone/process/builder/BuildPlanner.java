@@ -123,6 +123,14 @@ public final class BuildPlanner {
          */
         public final Map<BlockPos, String> waiting = new LinkedHashMap<>();
         public long micros;
+        /**
+         * How many places to stand the walking model reached from the player when this was planned
+         */
+        public int reachable;
+        /**
+         * Whether only those were used (a stand the model didn't reach turned out not to be got to)
+         */
+        public boolean trusted;
 
         Plan(String phase, int layer) {
             this.phase = phase;
@@ -143,7 +151,8 @@ public final class BuildPlanner {
 
         public String summary() {
             return phase + (layer != Integer.MIN_VALUE ? " y=" + layer : "") + ": " + steps() + " steps from " + stages.size() + " stands"
-                    + (waiting.isEmpty() ? "" : ", " + waiting.size() + " waiting") + " (" + micros / 1000 + "ms)";
+                    + (waiting.isEmpty() ? "" : ", " + waiting.size() + " waiting") + ", " + reachable + " places reachable" + (trusted ? "" : " (not trusted)")
+                    + " (" + micros / 1000 + "ms)";
         }
 
         public List<String> describe() {
@@ -419,6 +428,8 @@ public final class BuildPlanner {
         this.throwaway = throwaway;
         Plan plan = plan(world, from, litter);
         plan.micros = (System.nanoTime() - start) / 1000;
+        plan.reachable = reachable.size();
+        plan.trusted = trustReach;
         return plan;
     }
 
