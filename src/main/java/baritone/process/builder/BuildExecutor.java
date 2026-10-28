@@ -171,10 +171,9 @@ public final class BuildExecutor {
     private int confirmedAtLastPlan = -1;
     private int plansWithoutProgress;
     /**
-     * The next plan is made because something was learnt about the world (a block the world changed), not because
-     * anything failed: it doesn't count towards giving up
+     * Cells of the current plan the world changed after they were placed, left as they are: their steps are skipped
      */
-    private boolean learnt;
+    private final Set<BlockPos> leftAlone = new HashSet<>();
 
     public BuildExecutor(Baritone baritone, ISchematic schematic, BlockPos origin, Log log) {
         this.baritone = baritone;
@@ -303,17 +302,17 @@ public final class BuildExecutor {
     // ---- planning
 
     private boolean makePlan() {
-        if (confirmed == confirmedAtLastPlan && !learnt) {
+        if (confirmed == confirmedAtLastPlan) {
             plansWithoutProgress++;
-        } else if (confirmed != confirmedAtLastPlan) {
+        } else {
             plansWithoutProgress = 0;
         }
-        learnt = false;
         confirmedAtLastPlan = confirmed;
         for (int attempt = 0; attempt < 2; attempt++) {
             VirtualWorld world = new VirtualWorld(ctx);
             plan = planner.next(world, ctx.playerFeet(), approxPlaceable(), have(), throwaway(), litter());
             stageIndex = 0;
+            leftAlone.clear();
             stepIndex = 0;
             log.event("PLAN (" + replanWhy + "): " + String.join("\n", plan.describe()));
             if (plan.isEmpty()) {
@@ -343,6 +342,10 @@ public final class BuildExecutor {
             List<BuildPlanner.Step> steps = plan.stages.get(stageIndex).steps;
             while (stepIndex < steps.size()) {
                 BuildPlanner.Step step = steps.get(stepIndex);
+                if (leftAlone.contains(step.pos)) {
+                    stepIndex++;
+                    continue;
+                }
                 if (isPending(step.pos)) {
                     return step;
                 }
@@ -354,9 +357,10 @@ public final class BuildExecutor {
                     BlockState real = ctx.world().getBlockState(step.pos);
                     log.event("the " + placedBlock.get(step.pos).getName().getString() + " placed at " + p(step.pos) + " turned into " + s(real) + " by itself: leaving it");
                     planner.giveUp(step.pos, "turned into " + real.getBlock().getName().getString() + " by itself after it was placed");
-                    learnt = true;
-                    replan("the world changed " + p(step.pos) + " after it was placed");
-                    return null;
+                    // the rest of the plan stands: each step is checked against the world before it's done anyway
+                    leftAlone.add(step.pos);
+                    stepIndex++;
+                    continue;
                 }
                 String why = impossible(step);
                 if (why != null) {
