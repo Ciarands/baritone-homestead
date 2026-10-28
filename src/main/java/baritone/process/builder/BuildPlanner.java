@@ -280,7 +280,8 @@ public final class BuildPlanner {
         int minZ = origin.getZ() - REACH_MARGIN, maxZ = origin.getZ() + schematic.lengthZ() + REACH_MARGIN;
         ArrayDeque<BlockPos> queue = new ArrayDeque<>();
         for (BlockPos seed : new BlockPos[]{from, from.above(), from.below()}) {
-            if (standable(world, seed) && reachable.add(seed.asLong())) {
+            // where the player is counts, standable as the model sees it or not (mid-step, on something odd)
+            if ((seed == from || standable(world, seed)) && reachable.add(seed.asLong())) {
                 queue.add(seed);
             }
         }
