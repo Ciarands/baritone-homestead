@@ -31,6 +31,7 @@ import baritone.api.schematic.SubstituteSchematic;
 import baritone.api.schematic.format.ISchematicFormat;
 import baritone.process.builder.BuildExecutor;
 import baritone.process.builder.BuildPlanner;
+import baritone.process.builder.VirtualWorld;
 import baritone.utils.BaritoneProcessHelper;
 import baritone.utils.schematic.MapArtSchematic;
 import baritone.utils.schematic.SchematicSystem;
@@ -42,6 +43,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Vec3i;
 import net.minecraft.util.Tuple;
 import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Blocks;
@@ -71,6 +73,17 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
     private List<BlockState> approxPlaceable = new ArrayList<>();
     private BuildExecutor executor;
     private final BuilderLog dlog = new BuilderLog();
+    /**
+     * Building materials taken from and put back into Tom's Simple Storage (buildWithTomsSimpleStorage)
+     */
+    private BuildStorage storage;
+    private boolean fetchedForStart;
+    private boolean returnedAtEnd;
+    private long lastStorageCheck;
+    /**
+     * How often what's in the inventory is checked against what the build still needs (to fetch or put back)
+     */
+    private static final int STORAGE_CHECK_TICKS = 200;
 
     public BuilderProcess(Baritone baritone) {
         super(baritone);
@@ -110,6 +123,10 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
         }
         this.origin = new Vec3i(x, y, z);
         this.paused = false;
+        if (storage != null) {
+            storage.reset();
+        }
+        this.storage = Baritone.settings().buildWithTomsSimpleStorage.value ? new BuildStorage(ctx) : null;
         this.numRepeats = 0;
         start();
     }
@@ -119,6 +136,8 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
      */
     private void start() {
         this.executor = null;
+        this.fetchedForStart = false;
+        this.returnedAtEnd = false;
         if (Baritone.settings().buildDebugLog.value) {
             dlog.open(baritone.getDirectory().resolve("builder.log"), "Building " + name + " at " + p(new BlockPos(origin)) + " size " + schematic.widthX() + "x" + schematic.heightY() + "x" + schematic.lengthZ()
                     + " | buildIgnoreDirection=" + Baritone.settings().buildIgnoreDirection.value + " okIfWater=" + Baritone.settings().okIfWater.value
@@ -310,6 +329,10 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
                 return null;
             }
         }
+        PathingCommand storing = useStorage(isSafeToCancel);
+        if (storing != null) {
+            return storing;
+        }
         PathingCommand command = executor.tick(calcFailed, isSafeToCancel);
         if (command != null) {
             return command;
@@ -326,11 +349,21 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
         notDone.values().stream().filter(why -> why.startsWith(BuildPlanner.MISSING))
                 .forEach(why -> missing.merge(why.substring(BuildPlanner.MISSING.length()), 1, Integer::sum));
         if (!missing.isEmpty()) {
+            if (storage != null && storage.startFetch(executor.planner().itemsStillNeeded(new VirtualWorld(ctx)))) {
+                return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE); // fetched over the next ticks
+            }
             logDirect("Missing materials for " + missing.values().stream().mapToInt(Integer::intValue).sum() + " blocks: " + missing
-                    + ". Get them and #resume");
+                    + (storage == null ? "" : ", not in Tom's Simple Storage either") + ". Get them and #resume");
             dbgEvent("paused: missing materials " + missing);
             paused = true;
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+        }
+        if (storage != null && !returnedAtEnd && storage.borrowedAny()) {
+            // what was taken out for the build and is left over goes back first (put back over the next ticks)
+            returnedAtEnd = true;
+            if (storage.startReturn(Collections.emptyMap())) {
+                return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+            }
         }
         Vec3i repeat = Baritone.settings().buildRepeat.value;
         int max = Baritone.settings().buildRepeatCount.value;
@@ -347,6 +380,48 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
         }
         onLostControl();
         return null;
+    }
+
+    /**
+     * Takes building materials from Tom's Simple Storage and puts them back: what the build needs is fetched at the
+     * start and whenever it's held up for want of an item; what was taken out and isn't needed any more goes back. While
+     * that's going on, pathing waits.
+     *
+     * @return The command while something's being fetched or put back, else null
+     */
+    private PathingCommand useStorage(boolean isSafeToCancel) {
+        if (storage == null) {
+            return null;
+        }
+        if (!storage.busy()) {
+            long now = ctx.world().getGameTime();
+            boolean held = executor.waitsForItems();
+            boolean due = !fetchedForStart || ((held || storage.borrowedAny()) && now - lastStorageCheck >= STORAGE_CHECK_TICKS);
+            if (!due || !(isSafeToCancel && ctx.player().onGround())) {
+                return null; // (finishing the current movement first)
+            }
+            lastStorageCheck = now;
+            if (!WirelessTerminal.carried(ctx)) {
+                fetchedForStart = true;
+                return null; // no terminal, nothing to work out
+            }
+            Map<Item, Integer> needed = executor.planner().itemsStillNeeded(new VirtualWorld(ctx));
+            boolean started = (!fetchedForStart || held) && storage.startFetch(needed);
+            fetchedForStart = true;
+            if (!started && !storage.startReturn(needed)) {
+                return null;
+            }
+        }
+        baritone.getInputOverrideHandler().clearAllKeys();
+        if (storage.tick()) {
+            String result = storage.result();
+            if (result != null) {
+                logDirect(result);
+                dbgEvent(result);
+            }
+            executor.resume(); // planned again with what the inventory holds now
+        }
+        return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
     }
 
     /**
@@ -404,6 +479,9 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
 
     @Override
     public void onLostControl() {
+        if (storage != null) {
+            storage.reset(); // (what was taken out stays in the inventory)
+        }
         if (schematic != null) {
             dbgEvent("stopped" + (executor == null ? "" : " (" + executor.confirmed() + " steps confirmed)"));
         }

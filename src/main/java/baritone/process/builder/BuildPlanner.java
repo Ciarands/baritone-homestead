@@ -30,7 +30,12 @@ import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.LiquidBlock;
+import net.minecraft.world.level.block.SlabBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BedPart;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
+import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.*;
@@ -501,6 +506,43 @@ public final class BuildPlanner {
      */
     public void retryMissing() {
         unbuildable.values().removeIf(why -> why.startsWith(MISSING));
+    }
+
+    /**
+     * @return How many of each item the rest of the build takes to place, the items of the lowest layers first (what
+     * isn't to be built any more, other than for want of the item, leaves nothing to count)
+     */
+    public Map<Item, Integer> itemsStillNeeded(VirtualWorld world) {
+        Map<Item, Integer> needed = new LinkedHashMap<>();
+        for (int y = 0; y < schematic.heightY(); y++) {
+            for (BlockPos pos : layer(origin.getY() + y)) {
+                String why = unbuildable.get(pos);
+                if (why != null && !why.startsWith(MISSING)) {
+                    continue;
+                }
+                BlockState desired = desired(world, pos);
+                BlockState current = world.get(pos);
+                if (desired == null || desired.getBlock() instanceof AirBlock || BlockRules.valid(current, desired, false)
+                        || BlockRules.needsToggle(current, desired) || BlockRules.awaitsPartner(current, desired)) {
+                    continue;
+                }
+                if ((desired.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF) && desired.getValue(BlockStateProperties.DOUBLE_BLOCK_HALF) == DoubleBlockHalf.UPPER)
+                        || (desired.hasProperty(BlockStateProperties.BED_PART) && desired.getValue(BlockStateProperties.BED_PART) == BedPart.HEAD)) {
+                    continue; // placed along with the other half, by the one item
+                }
+                Item item = PlacementModel.itemFor(desired);
+                if (item != null) {
+                    // a double slab is two, one if a half is there already
+                    boolean doubleSlab = desired.getBlock() instanceof SlabBlock && desired.getValue(SlabBlock.TYPE) == SlabType.DOUBLE;
+                    needed.merge(item, doubleSlab && !BlockRules.needsSecondSlab(current, desired) ? 2 : 1, Integer::sum);
+                }
+                Item use = BlockRules.useItem(desired);
+                if (use != null) {
+                    needed.merge(use, 1, Integer::sum);
+                }
+            }
+        }
+        return needed;
     }
 
     private Plan plan(VirtualWorld world, BlockPos from, Collection<BlockPos> litter) {

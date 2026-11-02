@@ -1406,6 +1406,13 @@ public final class Settings {
     public final Setting<Boolean> depositToTomsSimpleStorageWirelessTerminal = new Setting<>(false);
 
     /**
+     * When building, take the blocks the schematic needs from Tom's Simple Storage through an Advanced Wireless Terminal
+     * (carried, bound to a storage terminal in range), and put them back once the build doesn't need them any more.
+     * What's taken out is all that's put back: the player's own items stay.
+     */
+    public final Setting<Boolean> buildWithTomsSimpleStorage = new Setting<>(true);
+
+    /**
      * When the tool about to break a block would trigger the Vein Mining mod (which then breaks the whole connected
      * vein, server side), check every block of that vein first. If any is unsafe to break (touching liquid, something
      * Baritone avoids breaking, or the block we're standing on), sneak so Vein Mining stays off and only the one block

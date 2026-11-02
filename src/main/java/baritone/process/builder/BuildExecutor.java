@@ -210,6 +210,13 @@ public final class BuildExecutor {
     }
 
     /**
+     * @return Whether the plan being carried out leaves something for want of the item to place it with
+     */
+    public boolean waitsForItems() {
+        return plan != null && plan.waiting.values().stream().anyMatch(why -> why.startsWith(BuildPlanner.MISSING));
+    }
+
+    /**
      * Going on after a pause: whatever was left for want of materials is tried again
      */
     public void resume() {
