@@ -59,7 +59,9 @@ import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Predicate;
 
@@ -101,8 +103,29 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
             Blocks.CACTUS.asItem()
     );
 
+    /**
+     * A full inventory goes into Tom's Simple Storage, but for a stack of each thing planted and of bone meal
+     * (depositToTomsSimpleStorageWirelessTerminal)
+     */
+    private final FullInventoryDeposit deposit;
+
     public FarmProcess(Baritone baritone) {
         super(baritone);
+        this.deposit = new FullInventoryDeposit(baritone);
+    }
+
+    /**
+     * @return What stays when the inventory is deposited: a stack of each thing that's planted, and of bone meal
+     */
+    private static Map<Object, Integer> depositKeep() {
+        Map<Object, Integer> keep = new HashMap<>();
+        for (Item item : FARMLAND_PLANTABLE) {
+            keep.put(item, 64);
+        }
+        keep.put(Items.NETHER_WART, 64);
+        keep.put(Items.COCOA_BEANS, 64);
+        keep.put(Items.BONE_MEAL, 64);
+        return keep;
     }
 
     @Override
@@ -203,6 +226,10 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
 
     @Override
     public PathingCommand onTick(boolean calcFailed, boolean isSafeToCancel) {
+        PathingCommand depositing = deposit.tick(isSafeToCancel, ItemStack::getItem, FarmProcess::depositKeep, this::logDirect);
+        if (depositing != null) {
+            return depositing;
+        }
         if (Baritone.settings().mineGoalUpdateInterval.value != 0 && tickCount++ % Baritone.settings().mineGoalUpdateInterval.value == 0) {
             ArrayList<Block> scan = new ArrayList<>();
             for (Harvest harvest : Harvest.values()) {
@@ -408,6 +435,7 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
 
     @Override
     public void onLostControl() {
+        deposit.reset();
         active = false;
     }
 

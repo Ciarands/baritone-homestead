@@ -1398,10 +1398,12 @@ public final class Settings {
     public final Setting<Boolean> notificationOnMineFail = new Setting<>(true);
 
     /**
-     * When mining fills the inventory, open Tom's Simple Storage's Advanced Wireless Terminal (carried in the inventory,
-     * offhand or a trinket slot, and bound to a storage terminal in range) and deposit into it instead of stopping.
-     * Deposits everything in the main inventory plus the mining targets in the hotbar, never tools, armor, food or the
-     * terminal itself.
+     * When mining, farming, clearing or building fills the inventory, open Tom's Simple Storage's Advanced Wireless
+     * Terminal (carried in the inventory, offhand or a trinket slot, and bound to a storage terminal in range) and
+     * deposit into it instead of stopping or leaving drops behind. Never tools, armor, food or the terminal itself.
+     * Mining deposits everything in the main inventory plus the mining targets in the hotbar; farming keeps a stack of
+     * each thing it plants and of bone meal; clearing and building keep the hotbar, what the schematic still needs and a
+     * stack of throwaway blocks.
      */
     public final Setting<Boolean> depositToTomsSimpleStorageWirelessTerminal = new Setting<>(false);
 

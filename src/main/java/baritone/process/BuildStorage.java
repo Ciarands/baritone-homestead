@@ -75,6 +75,15 @@ final class BuildStorage {
     }
 
     /**
+     * What was taken out and isn't held any more (placed, or deposited with a full inventory) isn't to be put back: what
+     * comes into the inventory later is the player's own.
+     */
+    void forgetGone() {
+        borrowed.replaceAll((item, count) -> Math.min(count, WirelessTerminal.count(ctx.player().getInventory(), item)));
+        borrowed.values().removeIf(count -> count <= 0);
+    }
+
+    /**
      * Starts taking out what the build still needs ({@code needed}, the lowest layers' first) and the inventory lacks.
      *
      * @return Whether there's anything to ask storage for

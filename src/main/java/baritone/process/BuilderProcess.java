@@ -84,9 +84,18 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
      * How often what's in the inventory is checked against what the build still needs (to fetch or put back)
      */
     private static final int STORAGE_CHECK_TICKS = 200;
+    /**
+     * A full inventory goes into Tom's Simple Storage, but for what the build still needs (depositToTomsSimpleStorageWirelessTerminal)
+     */
+    private final FullInventoryDeposit deposit;
+    /**
+     * What any throwaway item counts as, for what's kept when depositing: a stack of them, to put down while building
+     */
+    private static final Object THROWAWAY = new Object();
 
     public BuilderProcess(Baritone baritone) {
         super(baritone);
+        this.deposit = new FullInventoryDeposit(baritone);
     }
 
     @Override
@@ -329,6 +338,13 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
                 return null;
             }
         }
+        PathingCommand depositing = deposit.tick(isSafeToCancel, stack -> depositKind(stack.getItem()), this::depositKeep, message -> {
+            logDirect(message);
+            dbgEvent(message);
+        });
+        if (depositing != null) {
+            return depositing;
+        }
         PathingCommand storing = useStorage(isSafeToCancel);
         if (storing != null) {
             return storing;
@@ -382,6 +398,20 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
         return null;
     }
 
+    private static Object depositKind(Item item) {
+        return Baritone.settings().acceptableThrowawayItems.value.contains(item) ? THROWAWAY : item;
+    }
+
+    /**
+     * @return What stays when the inventory is deposited: what the rest of the build takes, and a stack of throwaways
+     */
+    private Map<Object, Integer> depositKeep() {
+        Map<Object, Integer> keep = new HashMap<>();
+        executor.planner().itemsStillNeeded(new VirtualWorld(ctx)).forEach((item, count) -> keep.merge(depositKind(item), count, Integer::sum));
+        keep.merge(THROWAWAY, 64, Integer::sum);
+        return keep;
+    }
+
     /**
      * Takes building materials from Tom's Simple Storage and puts them back: what the build needs is fetched at the
      * start and whenever it's held up for want of an item; what was taken out and isn't needed any more goes back. While
@@ -394,6 +424,7 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
             return null;
         }
         if (!storage.busy()) {
+            storage.forgetGone();
             long now = ctx.world().getGameTime();
             boolean held = executor.waitsForItems();
             boolean due = !fetchedForStart || ((held || storage.borrowedAny()) && now - lastStorageCheck >= STORAGE_CHECK_TICKS);
@@ -482,6 +513,7 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
         if (storage != null) {
             storage.reset(); // (what was taken out stays in the inventory)
         }
+        deposit.reset();
         if (schematic != null) {
             dbgEvent("stopped" + (executor == null ? "" : " (" + executor.confirmed() + " steps confirmed)"));
         }

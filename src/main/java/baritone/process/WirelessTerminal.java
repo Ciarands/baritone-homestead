@@ -124,6 +124,39 @@ final class WirelessTerminal {
     }
 
     /**
+     * Stores the main inventory but for what's kept: of each kind {@code kind} gives, {@code keep} that many (in whole
+     * stacks, what the hotbar holds counting first). Never the hotbar, tools, weapons, armor, food or the terminal.
+     */
+    static Job depositKeeping(Function<ItemStack, Object> kind, Map<Object, Integer> keep) {
+        return (ctx, menu, ticks) -> {
+            Inventory inv = ctx.player().getInventory();
+            if (ticks == 1) {
+                Map<Object, Integer> left = new HashMap<>(keep);
+                for (int slot = 0; slot < Inventory.getSelectionSize(); slot++) {
+                    ItemStack stack = inv.items.get(slot);
+                    if (!stack.isEmpty()) {
+                        left.computeIfPresent(kind.apply(stack), (k, count) -> count - stack.getCount());
+                    }
+                }
+                shiftClick(ctx, menu, (stack, inventorySlot) -> {
+                    if (!shouldDeposit(stack, inventorySlot, s -> false)) {
+                        return false;
+                    }
+                    Object k = kind.apply(stack);
+                    Integer count = left.get(k);
+                    if (count != null && count > 0) {
+                        left.put(k, count - stack.getCount());
+                        return false;
+                    }
+                    return true;
+                });
+                return false;
+            }
+            return ticks > SYNC_MIN_TICKS && inv.getFreeSlot() != -1 || ticks >= SYNC_MAX_TICKS;
+        };
+    }
+
+    /**
      * Advances a job by one tick, opening the terminal first.
      */
     Status tick(Job job) {
