@@ -244,14 +244,21 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
      */
     private static final int RIGHT_CLICK_GIVE_UP_TICKS = 40;
     /**
-     * Until the server has answered, the right-click isn't sent again for this long
+     * Until the server has answered, a right-click or bone meal isn't sent again for this long
      */
-    private static final int RIGHT_CLICK_RESEND_TICKS = 10;
-    private static final int RIGHT_CLICKS_PER_TICK = 4;
+    private static final int USE_RESEND_TICKS = 10;
+    /**
+     * Right-clicks and bone meal sent by packet in a tick at most
+     */
+    private static final int USES_PER_TICK = 16;
     /**
      * Ripe crops right-clicked: when first, when last
      */
     private final Map<BlockPos, long[]> rightClicks = new HashMap<>();
+    /**
+     * Crops bone meal was sent to: when
+     */
+    private final Map<BlockPos, Long> boneMealSent = new HashMap<>();
     private static Field rightClickHarvestHello;
     private static boolean noRightClickHarvest;
 
@@ -268,13 +275,28 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
     }
 
     /**
-     * Right-clicks a ripe crop by sending the packet a click would: no need to look at it or stand by it, the server
-     * only wants it within reach.
+     * Right-clicks a block with what's in hand by sending the packet a click would: no need to look at it or stand by
+     * it, the server only wants it within reach.
      */
-    private void sendRightClick(BlockPos pos) {
+    private void sendUse(BlockPos pos) {
         BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(pos), Direction.UP, pos, false);
         ((IPlayerControllerMP) Minecraft.getInstance().gameMode).callStartPrediction(ctx.player().clientLevel,
                 sequence -> new ServerboundUseItemOnPacket(InteractionHand.MAIN_HAND, hit, sequence));
+    }
+
+    /**
+     * @return Bone meal uses that grow it all the way, counting one stage each (most give more): what's sent beyond
+     * that isn't used up, the server only uses bone meal on what can still grow
+     */
+    private static int boneMealUses(BlockState state) {
+        Block block = state.getBlock();
+        if (block instanceof CropBlock) {
+            return Math.max(1, ((CropBlock) block).getMaxAge() - ((CropBlock) block).getAge(state));
+        }
+        if (block instanceof CocoaBlock) {
+            return Math.max(1, 2 - state.getValue(CocoaBlock.AGE));
+        }
+        return 1;
     }
 
     /**
@@ -381,12 +403,12 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
         rightClicks.keySet().removeIf(pos -> !readyForHarvest(ctx.world(), pos, ctx.world().getBlockState(pos)));
         int rightClicked = 0;
         for (BlockPos pos : toBreak) {
-            if (rightClicked == RIGHT_CLICKS_PER_TICK || ctx.player().getEyePosition().distanceToSqr(Vec3.atCenterOf(pos)) > blockReachDistance * blockReachDistance
+            if (rightClicked == USES_PER_TICK || ctx.player().getEyePosition().distanceToSqr(Vec3.atCenterOf(pos)) > blockReachDistance * blockReachDistance
                     || !rightClickHarvests(pos, ctx.world().getBlockState(pos), now)) {
                 continue;
             }
             long[] clicked = rightClicks.computeIfAbsent(pos.immutable(), p -> new long[]{now, Long.MIN_VALUE / 2});
-            if (now - clicked[1] < RIGHT_CLICK_RESEND_TICKS) {
+            if (now - clicked[1] < USE_RESEND_TICKS) {
                 continue;
             }
             if (rightClicked == 0) {
@@ -394,7 +416,7 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
                 baritone.getInventoryBehavior().throwaway(true, stack -> stack.getItem() instanceof HoeItem);
                 ctx.playerController().syncHeldItem();
             }
-            sendRightClick(pos);
+            sendUse(pos);
             clicked[1] = now;
             rightClicked++;
         }
@@ -456,18 +478,30 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
                 }
             }
         }
+        // bone meal by packet as well: on everything in reach at once, without looking, each enough to grow it all the way
+        boneMealSent.values().removeIf(sent -> now - sent >= USE_RESEND_TICKS);
+        int boneMealed = 0;
         for (BlockPos pos : bonemealable) {
-            if (playerPos.distSqr(pos) > blockReachDistance * blockReachDistance) {
+            if (boneMealed >= USES_PER_TICK) {
+                break;
+            }
+            if (ctx.player().getEyePosition().distanceToSqr(Vec3.atCenterOf(pos)) > blockReachDistance * blockReachDistance || boneMealSent.containsKey(pos)) {
                 continue;
             }
-            Optional<Rotation> rot = RotationUtils.reachable(ctx, pos);
-            if (rot.isPresent() && isSafeToCancel && baritone.getInventoryBehavior().throwaway(true, this::isBoneMeal)) {
-                baritone.getLookBehavior().updateTarget(rot.get(), true);
-                if (ctx.isLookingAt(pos)) {
-                    baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, true);
+            if (boneMealed == 0) {
+                if (!baritone.getInventoryBehavior().throwaway(true, this::isBoneMeal)) {
+                    break;
                 }
-                return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+                ctx.playerController().syncHeldItem();
             }
+            for (int uses = boneMealUses(ctx.world().getBlockState(pos)); uses > 0; uses--) {
+                sendUse(pos);
+                boneMealed++;
+            }
+            boneMealSent.put(pos.immutable(), now);
+        }
+        if (boneMealed > 0) {
+            return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
         }
 
         if (calcFailed) {
@@ -507,17 +541,20 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
                 goalz.add(new GoalBlock(pos));
             }
         }
+        boolean dropsFalling = false;
         for (Entity entity : ctx.entities()) {
-            if (entity instanceof ItemEntity && entity.onGround()) {
-                ItemEntity ei = (ItemEntity) entity;
-                if (PICKUP_DROPPED.contains(ei.getItem().getItem())) {
-                    // +0.1 because of farmland's 0.9375 dummy height lol
-                    goalz.add(new GoalBlock(new BetterBlockPos(entity.position().x, entity.position().y + 0.1, entity.position().z)));
-                }
+            if (!(entity instanceof ItemEntity) || !PICKUP_DROPPED.contains(((ItemEntity) entity).getItem().getItem())) {
+                continue;
+            }
+            if (entity.onGround()) {
+                // +0.1 because of farmland's 0.9375 dummy height lol
+                goalz.add(new GoalBlock(new BetterBlockPos(entity.position().x, entity.position().y + 0.1, entity.position().z)));
+            } else if (((ItemEntity) entity).getAge() < 40 && entity.distanceToSqr(ctx.player()) < 8 * 8) {
+                dropsFalling = true; // just harvested, not landed yet
             }
         }
         if (goalz.isEmpty()) {
-            if (hasImmatureCrop && Baritone.settings().farmWaitForGrowth.value) {
+            if ((hasImmatureCrop && Baritone.settings().farmWaitForGrowth.value) || dropsFalling) {
                 return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
             }
             logDirect("Farm failed");
