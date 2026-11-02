@@ -33,6 +33,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.border.WorldBorder;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.gameevent.GameEvent;
+import net.minecraft.world.level.lighting.LevelLightEngine;
 import net.minecraft.world.level.redstone.NeighborUpdater;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
@@ -116,6 +117,14 @@ final class PlanLevel extends ClientLevel {
     @Override
     public List<Entity> getEntities(Entity except, AABB area, Predicate<? super Entity> predicate) {
         return Collections.emptyList();
+    }
+
+    /**
+     * Light as it is in the real world (a crop wants light to be planted; what the plan builds isn't lit yet)
+     */
+    @Override
+    public LevelLightEngine getLightEngine() {
+        return real.getLightEngine();
     }
 
     @Override
