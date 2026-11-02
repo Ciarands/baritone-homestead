@@ -34,6 +34,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
+import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.*;
 import net.minecraft.world.level.block.piston.MovingPistonBlock;
@@ -51,6 +52,7 @@ import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.WaterFluid;
 import net.minecraft.world.level.pathfinder.PathComputationType;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -187,13 +189,37 @@ public interface MovementHelper extends ActionCosts, Helper {
         }
         try { // A dodgy catch-all at the end, for most blocks with default behaviour this will work, however where blocks are special this will error out, and we can handle it when we have this information
             if (state.isPathfindable(null, null, PathComputationType.LAND)) {
-                return YES;
+                // the game only says it isn't a full block: one that isn't but still reaches into where the player's
+                // body goes (a crystal hanging from the ceiling at head height, a chain) blocks the way all the same
+                return getsInTheWay(state) ? NO : YES;
             } else {
                 return NO;
             }
         } catch (Throwable exception) {
             System.out.println("The block " + state.getBlock().getName().getString() + " requires a special case due to the exception " + exception.getMessage());
             return MAYBE;
+        }
+    }
+
+    /**
+     * Where in a cell the player's body is when going through it, above what can be stepped up onto
+     */
+    AABB BODY = new AABB(0.2, 0.6, 0.2, 0.8, 1.0, 0.8);
+
+    /**
+     * @return Whether the block's collision reaches into where the player's body goes through its cell. A ladder against
+     * a side or something low enough to step over doesn't
+     */
+    static boolean getsInTheWay(BlockState state) {
+        try {
+            for (AABB box : state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()) {
+                if (box.intersects(BODY.minX, BODY.minY, BODY.minZ, BODY.maxX, BODY.maxY, BODY.maxZ)) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (Throwable e) { // a shape that needs the world round it: as the game says
+            return false;
         }
     }
 
