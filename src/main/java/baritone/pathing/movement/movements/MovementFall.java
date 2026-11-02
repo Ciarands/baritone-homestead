@@ -17,6 +17,7 @@
 
 package baritone.pathing.movement.movements;
 
+import baritone.Baritone;
 import baritone.api.IBaritone;
 import baritone.api.pathing.movement.MovementStatus;
 import baritone.api.utils.BetterBlockPos;
@@ -108,10 +109,14 @@ public class MovementFall extends Movement {
 
                 if (ctx.isLookingAt(dest) || ctx.isLookingAt(dest.below())) {
                     state.setInput(Input.CLICK_RIGHT, true);
+                    placedWater = true;
                 }
             }
         }
 
+        if (cleanup != Cleanup.NONE) {
+            return cleanUp(state);
+        }
         if (!MovementHelper.openDoors(ctx, state, src, new BetterBlockPos(dest.x, src.y, dest.z))) {
             return state;
         }
@@ -133,6 +138,14 @@ public class MovementFall extends Movement {
                     }
                 } else {
                     if (ctx.player().getDeltaMovement().y >= 0) {
+                        // nothing to take it back up with (a bucket that never empties): put a block in its place and
+                        // break that, if there's one to use
+                        if (placedWater && Baritone.settings().allowPlace.value && Baritone.settings().allowBreak.value
+                                && ((Baritone) baritone).getInventoryBehavior().hasGenericThrowaway()) {
+                            cleanup = Cleanup.STEP_OUT;
+                            cleanupSince = ctx.world().getGameTime();
+                            return cleanUp(state);
+                        }
                         return state.setStatus(MovementStatus.SUCCESS);
                     } // don't else return state; we need to stay centered because this water might be flowing under the surface
                 }
@@ -173,6 +186,90 @@ public class MovementFall extends Movement {
             }
         }
         return null;
+    }
+
+    private enum Cleanup {
+        NONE, STEP_OUT, PLACE, BREAK
+    }
+
+    /**
+     * Each step of the cleanup gets this long before it's left as it is
+     */
+    private static final int CLEANUP_TICKS = 100;
+
+    private boolean placedWater;
+    private Cleanup cleanup = Cleanup.NONE;
+    private long cleanupSince;
+    private BlockPos standOff;
+
+    /**
+     * Takes away the water put down to land in, when there's no empty bucket to take it back up with: steps out of
+     * it, puts a block in its place and breaks that (the water that ran off it dries up by itself). Any step that
+     * doesn't work out in time is given up and the water left
+     */
+    private MovementState cleanUp(MovementState state) {
+        if (ctx.world().getGameTime() - cleanupSince > CLEANUP_TICKS) {
+            return state.setStatus(MovementStatus.SUCCESS);
+        }
+        switch (cleanup) {
+            case STEP_OUT: {
+                if (standOff == null) {
+                    for (Direction dir : Direction.Plane.HORIZONTAL) {
+                        BlockPos next = dest.relative(dir);
+                        if (MovementHelper.canWalkOn(ctx, next.below()) && MovementHelper.canWalkThrough(ctx, new BetterBlockPos(next))
+                                && MovementHelper.canWalkThrough(ctx, new BetterBlockPos(next.above()))
+                                && !ctx.world().getFluidState(next).isSource()) {
+                            standOff = next;
+                            break;
+                        }
+                    }
+                    if (standOff == null) {
+                        return state.setStatus(MovementStatus.SUCCESS);
+                    }
+                }
+                Vec3 center = VecUtils.getBlockPosCenter(standOff);
+                if (ctx.playerFeet().equals(standOff) && Math.abs(ctx.player().position().x - center.x) < 0.25
+                        && Math.abs(ctx.player().position().z - center.z) < 0.25) {
+                    next(Cleanup.PLACE);
+                    return state;
+                }
+                state.setTarget(new MovementTarget(RotationUtils.calcRotationFromVec3d(ctx.playerHead(), center, ctx.playerRotations()), false));
+                return state.setInput(Input.MOVE_FORWARD, true);
+            }
+            case PLACE: {
+                if (!ctx.world().getFluidState(dest).isSource() && !ctx.world().getBlockState(dest).canBeReplaced()) {
+                    next(Cleanup.BREAK);
+                    return state;
+                }
+                if (MovementHelper.attemptToPlaceABlock(state, baritone, dest, true, false) == MovementHelper.PlaceResult.READY_TO_PLACE) {
+                    state.setInput(Input.CLICK_RIGHT, true);
+                }
+                return state.setStatus(MovementStatus.RUNNING);
+            }
+            case BREAK: {
+                BlockState placed = ctx.world().getBlockState(dest);
+                if (MovementHelper.canWalkThrough(ctx, new BetterBlockPos(dest))) {
+                    return state.setStatus(MovementStatus.SUCCESS);
+                }
+                Optional<Rotation> reach = RotationUtils.reachable(ctx, dest);
+                if (reach.isEmpty()) {
+                    return state.setStatus(MovementStatus.SUCCESS);
+                }
+                MovementHelper.switchToBestToolFor(ctx, placed);
+                state.setTarget(new MovementTarget(reach.get(), true));
+                if (ctx.isLookingAt(dest)) {
+                    state.setInput(Input.CLICK_LEFT, true);
+                }
+                return state;
+            }
+            default:
+                return state.setStatus(MovementStatus.SUCCESS);
+        }
+    }
+
+    private void next(Cleanup step) {
+        cleanup = step;
+        cleanupSince = ctx.world().getGameTime();
     }
 
     @Override
