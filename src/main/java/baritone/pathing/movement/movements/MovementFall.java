@@ -24,6 +24,7 @@ import baritone.api.utils.Rotation;
 import baritone.api.utils.RotationUtils;
 import baritone.api.utils.VecUtils;
 import baritone.api.utils.input.Input;
+import baritone.pathing.movement.Buckets;
 import baritone.pathing.movement.CalculationContext;
 import baritone.pathing.movement.Movement;
 import baritone.pathing.movement.MovementHelper;
@@ -36,9 +37,6 @@ import java.util.Set;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.Vec3i;
-import net.minecraft.world.entity.player.Inventory;
-import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -48,9 +46,6 @@ import net.minecraft.world.level.material.WaterFluid;
 import net.minecraft.world.phys.Vec3;
 
 public class MovementFall extends Movement {
-
-    private static final ItemStack STACK_BUCKET_WATER = new ItemStack(Items.WATER_BUCKET);
-    private static final ItemStack STACK_BUCKET_EMPTY = new ItemStack(Items.BUCKET);
 
     public MovementFall(IBaritone baritone, BetterBlockPos src, BetterBlockPos dest) {
         super(baritone, src, dest, MovementFall.buildPositionsToBreak(src, dest));
@@ -101,12 +96,13 @@ public class MovementFall extends Movement {
 
         boolean isWater = destState.getFluidState().getType() instanceof WaterFluid;
         if (!isWater && willPlaceBucket() && !playerFeet.equals(dest)) {
-            if (!Inventory.isHotbarSlot(ctx.player().getInventory().findSlotMatchingItem(STACK_BUCKET_WATER)) || ctx.world().dimension() == Level.NETHER) {
+            int water = Buckets.waterSlot(ctx.player().getInventory());
+            if (water < 0 || ctx.world().dimension() == Level.NETHER) {
                 return state.setStatus(MovementStatus.UNREACHABLE);
             }
 
             if (ctx.player().position().y - dest.getY() < ctx.playerController().getBlockReachDistance() && !ctx.player().onGround()) {
-                ctx.player().getInventory().selected = ctx.player().getInventory().findSlotMatchingItem(STACK_BUCKET_WATER);
+                ctx.player().getInventory().selected = water;
 
                 targetRotation = new Rotation(toDest.getYaw(), 90.0F);
 
@@ -127,8 +123,9 @@ public class MovementFall extends Movement {
         }
         if (playerFeet.equals(dest) && (ctx.player().position().y - playerFeet.getY() < 0.094 || isWater)) { // 0.094 because lilypads
             if (isWater) { // only match water, not flowing water (which we cannot pick up with a bucket)
-                if (Inventory.isHotbarSlot(ctx.player().getInventory().findSlotMatchingItem(STACK_BUCKET_EMPTY))) {
-                    ctx.player().getInventory().selected = ctx.player().getInventory().findSlotMatchingItem(STACK_BUCKET_EMPTY);
+                int empty = Buckets.emptySlot(ctx.player().getInventory());
+                if (empty >= 0) {
+                    ctx.player().getInventory().selected = empty;
                     if (ctx.player().getDeltaMovement().y >= 0) {
                         return state.setInput(Input.CLICK_RIGHT, true);
                     } else {

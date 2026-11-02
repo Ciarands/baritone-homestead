@@ -31,9 +31,6 @@ import it.unimi.dsi.fastutil.longs.LongSet;
 import it.unimi.dsi.fastutil.longs.LongSets;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
-import net.minecraft.world.entity.player.Inventory;
-import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.Items;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.ChunkPos;
@@ -51,8 +48,6 @@ import static baritone.api.pathing.movement.ActionCosts.COST_INF;
  * @since 8/7/2018
  */
 public class CalculationContext {
-
-    private static final ItemStack STACK_BUCKET_WATER = new ItemStack(Items.WATER_BUCKET);
 
     public final boolean safeForThreadedUse;
     public final IBaritone baritone;
@@ -109,7 +104,7 @@ public class CalculationContext {
         this.bsi = new BlockStateInterface(baritone.getPlayerContext(), forUseOnAnotherThread);
         this.toolSet = new ToolSet(player);
         this.hasThrowaway = Baritone.settings().allowPlace.value && ((Baritone) baritone).getInventoryBehavior().hasGenericThrowaway();
-        this.hasWaterBucket = Baritone.settings().allowWaterBucketFall.value && Inventory.isHotbarSlot(player.getInventory().findSlotMatchingItem(STACK_BUCKET_WATER)) && world.dimension() != Level.NETHER;
+        this.hasWaterBucket = Baritone.settings().allowWaterBucketFall.value && Buckets.waterSlot(player.getInventory()) >= 0 && world.dimension() != Level.NETHER;
         this.canSprint = Baritone.settings().allowSprint.value && player.getFoodData().getFoodLevel() > 6;
         this.placeBlockCost = Baritone.settings().blockPlacementPenalty.value;
         this.allowBreak = Baritone.settings().allowBreak.value;
