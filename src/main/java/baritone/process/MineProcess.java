@@ -73,6 +73,11 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
     private int tickCount;
     private final WirelessTerminal deposit;
     /**
+     * Falling Trees: a tree's base is broken and the rest comes down with it (only when breaking a log fells the tree)
+     */
+    private final FallingTrees fallingTrees = new FallingTrees();
+    private boolean fellTrees;
+    /**
      * Failed searches after which a location stays blacklisted for the rest of the run
      */
     private static final int MAX_UNREACHABLE = 3;
@@ -199,6 +204,12 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                 return null;
             }
         }
+        fellTrees = FallingTrees.fells(ctx);
+        if (fellTrees && FallingTrees.fallingNear(ctx, 8)) {
+            // the tree drops everything where it stood once it has landed: wait for it rather than walk off
+            baritone.getInputOverrideHandler().clearAllKeys();
+            return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+        }
         // Collect target drops lying a few blocks off before breaking more: mining everything within reach first left
         // drops inside dense veins until nothing was in reach anymore (and with drops right next to us, in pockets we
         // can't step into, they're left alone: we'd only stand there).
@@ -212,7 +223,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         // standing in its spot, which in hollow geodes (floating crystals, buds that can't be stood on) often has no
         // valid standing position even though the block is right in front of us: that fails the path search and
         // blacklists the block, and repeated, that is the pause loop.
-        Optional<BlockPos> inReach = curr.stream()
+        Optional<BlockPos> inReach = (fellTrees ? fallingTrees.targets(ctx.world(), curr) : curr).stream()
                 .filter(this::minableFromHere)
                 .min(Comparator.comparingDouble(pos -> pos.distToCenterSqr(ctx.playerHead())));
         baritone.getInputOverrideHandler().clearAllKeys();
@@ -281,7 +292,8 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             // path to: an empty goal would only fail the search and blacklist things. Explore instead, below.
             if (!locs2.isEmpty()) {
                 // can't reassign locs, gotta make a new var locs2, because we use it in a lambda right here, and variables you use in a lambda must be effectively final
-                Goal goal = new GoalComposite(locs2.stream().map(loc -> coalesce(loc, locs2, context)).toArray(Goal[]::new));
+                List<BlockPos> targets = fellTrees ? fallingTrees.targets(ctx.world(), locs2) : locs2;
+                Goal goal = new GoalComposite(targets.stream().map(loc -> coalesce(loc, targets, context)).toArray(Goal[]::new));
                 // An exploring path never ends in its goal, so plain revalidation doesn't interrupt it: targets showing
                 // up meanwhile (drops landing after the last block broke, ore coming into view) would wait for the
                 // whole explore segment, by which time they're far behind
