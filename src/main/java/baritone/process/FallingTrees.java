@@ -52,7 +52,7 @@ final class FallingTrees {
     private static Class<?> treeEntity;
 
     private final Map<BlockPos, Set<BlockPos>> fallsWith = new HashMap<>();
-    private long cachedAt = Long.MIN_VALUE;
+    private long cachedAt = Long.MIN_VALUE / 2;
 
     private static boolean load() {
         if (missing) {
