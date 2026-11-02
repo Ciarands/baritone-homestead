@@ -27,12 +27,14 @@ import baritone.api.utils.Rotation;
 import baritone.api.utils.input.Input;
 import baritone.pathing.movement.MovementState.MovementTarget;
 import baritone.pathing.precompute.Ternary;
+import baritone.utils.BackpackToolSwapper;
 import baritone.utils.BlockStateInterface;
 import baritone.utils.ToolSet;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.Level;
@@ -703,7 +705,17 @@ public interface MovementHelper extends ActionCosts, Helper {
      */
     static void switchToBestToolFor(IPlayerContext ctx, BlockState b, ToolSet ts, boolean preferSilkTouch) {
         if (Baritone.settings().autoTool.value && !Baritone.settings().assumeExternalAutoTool.value) {
-            ctx.player().getInventory().selected = ts.getBestSlot(b.getBlock(), preferSilkTouch);
+            Inventory inv = ctx.player().getInventory();
+            inv.selected = ts.getBestSlot(b.getBlock(), preferSilkTouch);
+            if (!BackpackToolSwapper.isTool(inv.getSelected()) && BackpackToolSwapper.active(ctx.player())) {
+                // a backpack's tool swapper swaps a tool in hand for its best one, and nothing else: hold one
+                for (int slot = 0; slot < 9; slot++) {
+                    if (BackpackToolSwapper.isTool(inv.getItem(slot))) {
+                        inv.selected = slot;
+                        break;
+                    }
+                }
+            }
         }
     }
 

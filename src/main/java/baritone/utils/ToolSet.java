@@ -29,7 +29,9 @@ import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -53,9 +55,16 @@ public class ToolSet {
 
     private final LocalPlayer player;
 
+    /**
+     * Tools a backpack's tool swapper swaps in when a block is hit (with a tool in hand: one in the hotbar to hold)
+     */
+    private final List<ItemStack> backpackTools;
+
     public ToolSet(LocalPlayer player) {
         breakStrengthCache = new HashMap<>();
         this.player = player;
+        boolean toolToHold = player.getInventory().items.subList(0, 9).stream().anyMatch(BackpackToolSwapper::isTool);
+        this.backpackTools = toolToHold && BackpackToolSwapper.active(player) ? BackpackToolSwapper.tools(player) : Collections.emptyList();
 
         if (Baritone.settings().considerPotionEffects.value) {
             double amplifier = potionAmplifier();
@@ -162,7 +171,11 @@ public class ToolSet {
      */
     private double getBestDestructionTime(Block b) {
         ItemStack stack = player.getInventory().getItem(getBestSlot(b, false, true));
-        return calculateSpeedVsBlock(stack, b.defaultBlockState()) * avoidanceMultiplier(b);
+        double speed = calculateSpeedVsBlock(stack, b.defaultBlockState());
+        for (ItemStack tool : backpackTools) {
+            speed = Math.max(speed, calculateSpeedVsBlock(tool, b.defaultBlockState()));
+        }
+        return speed * avoidanceMultiplier(b);
     }
 
     private double avoidanceMultiplier(Block b) {
