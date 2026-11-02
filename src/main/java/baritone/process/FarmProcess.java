@@ -23,6 +23,7 @@ import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalBlock;
 import baritone.api.pathing.goals.GoalGetToBlock;
 import baritone.api.pathing.goals.GoalComposite;
+import baritone.api.pathing.goals.GoalNear;
 import baritone.api.process.IFarmProcess;
 import baritone.api.process.PathingCommand;
 import baritone.api.process.PathingCommandType;
@@ -54,7 +55,6 @@ import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.BambooStalkBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.BonemealableBlock;
 import net.minecraft.world.level.block.CactusBlock;
 import net.minecraft.world.level.block.CocoaBlock;
 import net.minecraft.world.level.block.CropBlock;
@@ -69,9 +69,12 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Predicate;
 
 public final class FarmProcess extends BaritoneProcessHelper implements IFarmProcess {
@@ -153,6 +156,7 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
         active = true;
         locations = null;
         rightClicks.clear();
+        boneMealTargets = null;
     }
 
     private enum Harvest {
@@ -246,7 +250,7 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
     /**
      * Until the server has answered, a right-click or bone meal isn't sent again for this long
      */
-    private static final int USE_RESEND_TICKS = 10;
+    private static final int USE_RESEND_TICKS = 5;
     /**
      * Right-clicks and bone meal sent by packet in a tick at most
      */
@@ -259,6 +263,10 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
      * Crops bone meal was sent to: when
      */
     private final Map<BlockPos, Long> boneMealSent = new HashMap<>();
+    /**
+     * The blocks bone meal goes on (worked out once a farm has bone meal)
+     */
+    private Set<Block> boneMealTargets;
     private static Field rightClickHarvestHello;
     private static boolean noRightClickHarvest;
 
@@ -326,7 +334,7 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
             return depositing;
         }
         if (Baritone.settings().mineGoalUpdateInterval.value != 0 && tickCount++ % Baritone.settings().mineGoalUpdateInterval.value == 0) {
-            ArrayList<Block> scan = new ArrayList<>();
+            Set<Block> scan = new LinkedHashSet<>();
             for (Harvest harvest : Harvest.values()) {
                 scan.add(harvest.block);
             }
@@ -337,8 +345,16 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
                     scan.add(Blocks.SOUL_SAND);
                 }
             }
+            if (baritone.getInventoryBehavior().throwaway(false, this::isBoneMeal)) {
+                // with bone meal, whatever grows from it is worth finding too (saplings, stems, sugar cane, ...)
+                if (boneMealTargets == null) {
+                    boneMealTargets = new HashSet<>(BoneMeal.targets());
+                }
+                scan.addAll(boneMealTargets);
+            }
 
-            Baritone.getExecutor().execute(() -> locations = BaritoneAPI.getProvider().getWorldScanner().scanChunkRadius(ctx, scan, Baritone.settings().farmMaxScanSize.value, 10, 10));
+            List<Block> blocks = new ArrayList<>(scan);
+            Baritone.getExecutor().execute(() -> locations = BaritoneAPI.getProvider().getWorldScanner().scanChunkRadius(ctx, blocks, Baritone.settings().farmMaxScanSize.value, 10, 10));
         }
         if (locations == null) {
             return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
@@ -388,11 +404,9 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
                     break;
                 }
             }
-            if (state.getBlock() instanceof BonemealableBlock) {
-                BonemealableBlock ig = (BonemealableBlock) state.getBlock();
-                if (ig.isValidBonemealTarget(ctx.world(), pos, state, true) && ig.isBonemealSuccess(ctx.world(), ctx.world().random, pos, state)) {
-                    bonemealable.add(pos);
-                }
+            // the server decides whether a use takes (a sapling only sometimes grows): anything it's valid on gets it
+            if (boneMealTargets != null && boneMealTargets.contains(state.getBlock()) && BoneMeal.grows(ctx.world(), pos, state)) {
+                bonemealable.add(pos);
             }
         }
 
@@ -538,7 +552,8 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
         }
         if (baritone.getInventoryBehavior().throwaway(false, this::isBoneMeal)) {
             for (BlockPos pos : bonemealable) {
-                goalz.add(new GoalBlock(pos));
+                // bone meal goes on from within reach: no need to stand on it (on a sapling, the tree grows round us)
+                goalz.add(new GoalNear(pos, 3));
             }
         }
         boolean dropsFalling = false;
