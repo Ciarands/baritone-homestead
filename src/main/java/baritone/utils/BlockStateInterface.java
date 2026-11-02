@@ -55,6 +55,20 @@ public class BlockStateInterface {
 
     private static final BlockState AIR = Blocks.AIR.defaultBlockState();
 
+    /**
+     * Another view of the same chunks as {@code other}, for use on the same thread as it: no chunk source is made, so
+     * unlike the other constructors, any thread may do this
+     */
+    protected BlockStateInterface(BlockStateInterface other) {
+        this.provider = other.provider;
+        this.worldData = other.worldData;
+        this.world = other.world;
+        this.worldBorder = other.worldBorder;
+        this.useTheRealWorld = other.useTheRealWorld;
+        this.isPassableBlockPos = new BlockPos.MutableBlockPos();
+        this.access = new BlockStateInterfaceAccessWrapper(this);
+    }
+
     public BlockStateInterface(IPlayerContext ctx) {
         this(ctx, false);
     }

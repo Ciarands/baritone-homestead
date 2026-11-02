@@ -57,6 +57,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 /**
  * Builds a schematic: the {@link BuildPlanner} works out what to do and from where, layer by layer from the bottom, and
@@ -333,27 +336,63 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
                 }
             });
             if (Baritone.settings().buildPlanOnly.value) {
-                writePlan();
-                onLostControl();
-                return null;
+                // planned on another thread: a big build takes minutes, which the game can't spend frozen
+                simulating = CompletableFuture.supplyAsync(executor.simulation(), Baritone.getExecutor());
+                simulatingSince = ctx.world().getGameTime();
+                logDirect("Planning the whole build, without building (a big one takes minutes). #cancel stops it");
             }
         }
-        PathingCommand depositing = deposit.tick(isSafeToCancel, stack -> depositKind(stack.getItem()), this::depositKeep, message -> {
-            logDirect(message);
-            dbgEvent(message);
-        });
-        if (depositing != null) {
-            return depositing;
+        if (simulating != null) {
+            return planOnlyTick();
         }
-        PathingCommand storing = useStorage(isSafeToCancel);
-        if (storing != null) {
-            return storing;
+        if (!executor.isPlanning()) {
+            // (the planner's state is the planning thread's while it works)
+            PathingCommand depositing = deposit.tick(isSafeToCancel, stack -> depositKind(stack.getItem()), this::depositKeep, message -> {
+                logDirect(message);
+                dbgEvent(message);
+            });
+            if (depositing != null) {
+                return depositing;
+            }
+            PathingCommand storing = useStorage(isSafeToCancel);
+            if (storing != null) {
+                return storing;
+            }
         }
         PathingCommand command = executor.tick(calcFailed, isSafeToCancel);
         if (command != null) {
             return command;
         }
+        if (executor.failure() != null) {
+            logDirect("Planning failed, stopping: " + executor.failure());
+            dbgEvent("planning failed: " + executor.failure());
+            onLostControl();
+            return null;
+        }
         return finished();
+    }
+
+    /**
+     * The whole build being planned (buildPlanOnly), on another thread, or null
+     */
+    private CompletableFuture<List<String>> simulating;
+    private long simulatingSince;
+
+    private PathingCommand planOnlyTick() {
+        long elapsed = ctx.world().getGameTime() - simulatingSince;
+        if (!simulating.isDone()) {
+            if (elapsed > 0 && elapsed % 200 == 0) {
+                logDirect("Still planning: " + executor.simulatedPlans() + " plans so far, " + elapsed / 20 + " s");
+            }
+            return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+        }
+        try {
+            writePlan(simulating.join());
+        } catch (CompletionException | CancellationException e) {
+            logDirect("Planning failed: " + (e.getCause() != null ? e.getCause() : e));
+        }
+        onLostControl();
+        return null;
     }
 
     /**
@@ -485,8 +524,7 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
         return audit;
     }
 
-    private void writePlan() {
-        List<String> lines = executor.simulate();
+    private void writePlan(List<String> lines) {
         Path file = baritone.getDirectory().resolve("build-plan.txt");
         try {
             Files.write(file, lines, StandardCharsets.UTF_8);
@@ -514,6 +552,10 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
             storage.reset(); // (what was taken out stays in the inventory)
         }
         deposit.reset();
+        if (simulating != null && executor != null) {
+            executor.stopSimulating(); // (#cancel while planning the whole build)
+        }
+        simulating = null;
         if (schematic != null) {
             dbgEvent("stopped" + (executor == null ? "" : " (" + executor.confirmed() + " steps confirmed)"));
         }

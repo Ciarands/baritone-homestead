@@ -30,7 +30,8 @@ import java.util.List;
 /**
  * The builder's decision log (see the buildDebugLog setting): what it decided each tick and why, one file per build.
  * A tick's lines are written together; a tick exactly like the one before is only counted, so a bot doing the same
- * thing over and over shows up as one block of lines and how many ticks it went on for.
+ * thing over and over shows up as one block of lines and how many ticks it went on for. Written from the client thread
+ * and, while a plan is worked out, the planning thread: every entry point locks.
  */
 final class BuilderLog {
 
@@ -46,7 +47,7 @@ final class BuilderLog {
     private long firstRepeat;
     private long lastRepeat;
 
-    void open(Path file, String header) {
+    synchronized void open(Path file, String header) {
         close();
         try {
             out = Files.newBufferedWriter(file, StandardCharsets.UTF_8);
@@ -60,16 +61,16 @@ final class BuilderLog {
         }
     }
 
-    boolean isOpen() {
+    synchronized boolean isOpen() {
         return out != null;
     }
 
-    void beginTick(long tick) {
+    synchronized void beginTick(long tick) {
         this.tick = tick;
         frame.clear();
     }
 
-    void add(String line) {
+    synchronized void add(String line) {
         if (out != null) {
             frame.add(line);
         }
@@ -78,7 +79,7 @@ final class BuilderLog {
     /**
      * For something that happened outside the tick's decisions (a click's result, a build ending): written right away
      */
-    void event(long tick, String line) {
+    synchronized void event(long tick, String line) {
         if (out == null) {
             return;
         }
@@ -88,7 +89,7 @@ final class BuilderLog {
         flush();
     }
 
-    void endTick() {
+    synchronized void endTick() {
         if (out == null || frame.isEmpty()) {
             return;
         }
@@ -109,7 +110,7 @@ final class BuilderLog {
         flush();
     }
 
-    void close() {
+    synchronized void close() {
         if (out == null) {
             return;
         }

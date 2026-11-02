@@ -45,8 +45,30 @@ public final class VirtualWorld extends BlockStateInterface {
     private PlanLevel level;
 
     public VirtualWorld(IPlayerContext ctx) {
-        super(ctx);
+        this(ctx, false);
+    }
+
+    /**
+     * @param copyLoadedChunks For reading on another thread (planning there): the loaded chunks as they are now. Made
+     *                         on the client thread either way
+     */
+    public VirtualWorld(IPlayerContext ctx, boolean copyLoadedChunks) {
+        super(ctx, copyLoadedChunks);
         this.real = ctx.world();
+    }
+
+    private VirtualWorld(VirtualWorld other) {
+        super(other);
+        this.real = other.real;
+        this.overlay.putAll(other.overlay);
+    }
+
+    /**
+     * @return This world as it is now, unaffected by what's changed in it after: to keep looking at while planning
+     * goes on changing this one (on the same thread)
+     */
+    public VirtualWorld snapshot() {
+        return new VirtualWorld(this);
     }
 
     @Override

@@ -50,6 +50,10 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.*;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.function.Supplier;
 
 /**
  * Carries out {@link BuildPlanner} plans. For each step: if it can be done from where we are, do it, else go to where
@@ -220,6 +224,10 @@ public final class BuildExecutor {
      * Going on after a pause: whatever was left for want of materials is tried again
      */
     public void resume() {
+        if (planning != null) {
+            resumeAfterPlanning = true; // the planner is the planning thread's till then
+            return;
+        }
         planner.retryMissing();
         lastProgressTick = ctx.world().getGameTime();
         // time paused (waiting for materials, say) isn't time spent getting nowhere
@@ -227,6 +235,11 @@ public final class BuildExecutor {
         confirmedAtLastPlan = -1;
         replan("resumed");
     }
+
+    /**
+     * resume() came while a plan was being worked out: done once it's there
+     */
+    private boolean resumeAfterPlanning;
 
     private void replan(String why) {
         if (plan != null) {
@@ -244,6 +257,34 @@ public final class BuildExecutor {
      */
     public PathingCommand tick(boolean calcFailed, boolean isSafeToCancel) {
         long now = ctx.world().getGameTime();
+        if (planning != null) {
+            // the plan is worked out on another thread: the game goes on meanwhile (rendering, the connection)
+            if (!planning.isDone()) {
+                return pause("planning (" + (now - planningSince) / 20 + " s)");
+            }
+            BuildPlanner.Plan done;
+            try {
+                done = planning.join();
+            } catch (CompletionException | CancellationException e) {
+                planning = null;
+                failure = String.valueOf(e.getCause() != null ? e.getCause() : e);
+                log.event("PLANNING FAILED: " + failure);
+                return null;
+            }
+            planning = null;
+            lastProgressTick += now - planningSince; // working out a plan isn't time spent getting nowhere
+            if (resumeAfterPlanning) {
+                resumeAfterPlanning = false;
+                resume(); // planned again, with what's been taken back
+                return pause("planning again");
+            }
+            if (!accept(done)) {
+                return null;
+            }
+            if (planning != null) {
+                return pause("planning again");
+            }
+        }
         verifyPending(now);
         // slow mining isn't a stall (it has its own deadline), nor is waiting to see a click come out (that too)
         boolean breakingInTime = !pending.isEmpty()
@@ -261,9 +302,8 @@ public final class BuildExecutor {
             if (!pending.isEmpty()) {
                 return pause("waiting for " + pending.size() + " clicks to show before planning");
             }
-            if (!makePlan()) {
-                return null;
-            }
+            startPlanning(false);
+            return pause("planning");
         }
         BuildPlanner.Step step = current();
         if (step == null) {
@@ -316,36 +356,86 @@ public final class BuildExecutor {
 
     // ---- planning
 
-    private boolean makePlan() {
-        if (confirmed == confirmedAtLastPlan) {
-            plansWithoutProgress++;
-        } else {
-            plansWithoutProgress = 0;
-        }
-        confirmedAtLastPlan = confirmed;
-        for (int attempt = 0; attempt < 2; attempt++) {
-            VirtualWorld world = new VirtualWorld(ctx);
-            plan = planner.next(world, ctx.playerFeet(), approxPlaceable(), have(), throwaway(), litter());
-            stageIndex = 0;
-            leftAlone.clear();
-            stepIndex = 0;
-            log.event("PLAN (" + replanWhy + "): " + String.join("\n", plan.describe()));
-            if (plan.isEmpty()) {
-                // nothing to do isn't nothing working: no count towards giving up
+    /**
+     * The plan being worked out, on another thread, or null
+     */
+    private CompletableFuture<BuildPlanner.Plan> planning;
+    private long planningSince;
+    /**
+     * Whether the plan being worked out is the second go, after giving up on what the first kept planning
+     */
+    private boolean planningAgain;
+    /**
+     * Why planning failed (an error in it), or null
+     */
+    private String failure;
+
+    /**
+     * Starts working out the next plan on another thread. What it takes from the game (the world, where the player
+     * is, what's carried) is taken here, on the client thread.
+     */
+    private void startPlanning(boolean again) {
+        if (!again) {
+            if (confirmed == confirmedAtLastPlan) {
+                plansWithoutProgress++;
+            } else {
                 plansWithoutProgress = 0;
-                plan = null;
-                return false;
             }
-            if (plansWithoutProgress < MAX_PLANS_WITHOUT_PROGRESS) {
-                return true;
-            }
-            BuildPlanner.Step first = plan.stages.get(0).steps.get(0);
-            log.event("WATCHDOG: " + plansWithoutProgress + " plans with nothing done in between; giving up " + first);
-            planner.giveUp(first.pos, "planned over and over with nothing getting done");
-            plansWithoutProgress = 0;
-            replanWhy = "gave up on " + p(first.pos);
+            confirmedAtLastPlan = confirmed;
         }
-        return plan != null;
+        VirtualWorld world = new VirtualWorld(ctx, true); // (read on the planning thread)
+        BlockPos from = ctx.playerFeet();
+        List<BlockState> placeable = approxPlaceable();
+        Set<Item> items = have();
+        BlockState throwaway = throwaway();
+        Collection<BlockPos> litter = litter();
+        planningAgain = again;
+        planningSince = ctx.world().getGameTime();
+        planning = CompletableFuture.supplyAsync(() -> planner.next(world, from, placeable, items, throwaway, litter), Baritone.getExecutor());
+    }
+
+    /**
+     * Takes on a plan that's been worked out
+     *
+     * @return Whether there's anything to do: false when nothing more can be done
+     */
+    private boolean accept(BuildPlanner.Plan next) {
+        plan = next;
+        stageIndex = 0;
+        leftAlone.clear();
+        stepIndex = 0;
+        log.event("PLAN (" + replanWhy + "): " + String.join("\n", plan.describe()));
+        if (plan.isEmpty()) {
+            // nothing to do isn't nothing working: no count towards giving up
+            plansWithoutProgress = 0;
+            plan = null;
+            return false;
+        }
+        if (plansWithoutProgress < MAX_PLANS_WITHOUT_PROGRESS || planningAgain) {
+            return true;
+        }
+        BuildPlanner.Step first = plan.stages.get(0).steps.get(0);
+        log.event("WATCHDOG: " + plansWithoutProgress + " plans with nothing done in between; giving up " + first);
+        planner.giveUp(first.pos, "planned over and over with nothing getting done");
+        plansWithoutProgress = 0;
+        replanWhy = "gave up on " + p(first.pos);
+        plan = null;
+        startPlanning(true);
+        return true;
+    }
+
+    /**
+     * @return Whether a plan is being worked out (meanwhile the planner's state is the planning thread's)
+     */
+    public boolean isPlanning() {
+        return planning != null;
+    }
+
+    /**
+     * @return Why planning failed, or null if it didn't
+     */
+    public String failure() {
+        return failure;
     }
 
     /**
@@ -1075,15 +1165,33 @@ public final class BuildExecutor {
 
     // ---- planning the whole build, without doing it
 
+    private volatile int simulatedPlans;
+    private volatile boolean stopSimulating;
+
     /**
-     * Plans the whole build as if every step worked, with every item the schematic wants to hand
-     *
-     * @return The plans, each step, what would be left not right and why, and a map of each layer as it would end up
+     * @return Plans worked out so far by {@link #simulate} (it runs on another thread)
      */
-    public List<String> simulate() {
-        long start = System.nanoTime();
+    public int simulatedPlans() {
+        return simulatedPlans;
+    }
+
+    /**
+     * Makes {@link #simulate} stop after the plan it's on
+     */
+    public void stopSimulating() {
+        stopSimulating = true;
+    }
+
+    /**
+     * Plans the whole build as if every step worked, with every item the schematic wants to hand. What it takes from
+     * the game is taken here, on the client thread; the planning is the returned job's, for another thread.
+     *
+     * @return The job: the plans, each step, what would be left not right and why, and a map of each layer as it would
+     * end up
+     */
+    public Supplier<List<String>> simulation() {
         BuildPlanner sim = new BuildPlanner(ctx, schematic, origin);
-        VirtualWorld world = new VirtualWorld(ctx);
+        VirtualWorld world = new VirtualWorld(ctx, true);
         List<BlockState> placeable = approxPlaceable();
         Set<Item> items = have();
         forEachCell(pos -> {
@@ -1095,20 +1203,27 @@ public final class BuildExecutor {
                 }
             }
         });
-        BlockState throwaway = throwaway();
-        if (throwaway == null) {
-            throwaway = net.minecraft.world.level.block.Blocks.COBBLESTONE.defaultBlockState();
-        }
-        BlockPos at = ctx.playerFeet();
+        BlockState carried = throwaway();
+        BlockState throwaway = carried != null ? carried : net.minecraft.world.level.block.Blocks.COBBLESTONE.defaultBlockState();
+        BlockPos from = ctx.playerFeet();
+        return () -> simulate(sim, world, placeable, items, throwaway, from);
+    }
+
+    private List<String> simulate(BuildPlanner sim, VirtualWorld world, List<BlockState> placeable, Set<Item> items, BlockState throwaway, BlockPos from) {
+        long start = System.nanoTime();
+        BlockPos at = from;
         List<String> steps = new ArrayList<>();
         List<String> plans = new ArrayList<>();
         int stands = 0;
         int stepCount = 0;
         Map<String, Integer> how = new TreeMap<>();
         Map<BlockPos, Integer> placed = new HashMap<>();
-        for (int i = 0; i < 10000; i++) {
+        simulatedPlans = 0;
+        stopSimulating = false;
+        for (int i = 0; i < 10000 && !stopSimulating; i++) {
             long planStart = System.nanoTime();
             BuildPlanner.Plan plan = sim.next(world, at, placeable, items, throwaway, Collections.emptyList());
+            simulatedPlans = i + 1;
             log.event("simulated plan " + i + ": " + plan.summary() + " | " + sim.model().stats() + " | " + (System.nanoTime() - planStart) / 1_000_000 + "ms");
             if (plan.isEmpty()) {
                 break;
@@ -1144,7 +1259,7 @@ public final class BuildExecutor {
             }
         });
         List<String> out = new ArrayList<>();
-        out.add("Plan for " + schematic.widthX() + "x" + schematic.heightY() + "x" + schematic.lengthZ() + " at " + p(origin) + ", from " + p(ctx.playerFeet()));
+        out.add("Plan for " + schematic.widthX() + "x" + schematic.heightY() + "x" + schematic.lengthZ() + " at " + p(origin) + ", from " + p(from));
         out.add(String.format("%d plans, %d steps from %d stands %s, %d temporary blocks left; %d cells right, %d not; planned in %dms",
                 plans.size(), stepCount, stands, how, sim.temporary().size(), counts[0], counts[1], (System.nanoTime() - start) / 1_000_000));
         out.add("");
