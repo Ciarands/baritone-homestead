@@ -26,6 +26,7 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.DiggerItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ShearsItem;
+import net.minecraft.world.item.SwordItem;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
@@ -65,6 +66,10 @@ public final class BackpackToolSwapper {
     private static final Map<UUID, Long> requestedAt = new HashMap<>();
     private static long checkedAt = Long.MIN_VALUE / 2;
     private static volatile boolean active;
+    /**
+     * Whether a sword in hand gets swapped too (the swapper's "any" mode, not "only tools")
+     */
+    private static volatile boolean swords;
     private static volatile List<ItemStack> tools = Collections.emptyList();
 
     private BackpackToolSwapper() {}
@@ -86,10 +91,11 @@ public final class BackpackToolSwapper {
     }
 
     /**
-     * @return Whether the tool swapper swaps this when it's in hand (it leaves anything that isn't a tool alone)
+     * @return Whether the tool swapper swaps this when it's in hand (it leaves anything that isn't a tool alone, and
+     * swords in its "only tools" mode)
      */
     public static boolean isTool(ItemStack stack) {
-        return stack.getItem() instanceof DiggerItem || stack.getItem() instanceof ShearsItem;
+        return stack.getItem() instanceof DiggerItem || stack.getItem() instanceof ShearsItem || (swords && stack.getItem() instanceof SwordItem);
     }
 
     private static boolean load() {
@@ -128,6 +134,7 @@ public final class BackpackToolSwapper {
             return;
         }
         boolean found = false;
+        boolean anySwapsSwords = false;
         List<ItemStack> backpackTools = new ArrayList<>();
         try {
             Object contentsStore = storage.invoke(null);
@@ -142,8 +149,10 @@ public final class BackpackToolSwapper {
                     requestedAt.put(id, now);
                     sendToServer.invoke(null, requestContents.newInstance(id));
                 }
-                if (swapsTools(contents.getCompound("upgradeInventory"))) {
+                int mode = swapMode(contents.getCompound("upgradeInventory"));
+                if (mode != NO_SWAP) {
                     found = true;
+                    anySwapsSwords |= mode == ANY;
                     for (Tag item : contents.getCompound("inventory").getList("Items", Tag.TAG_COMPOUND)) {
                         ItemStack stack = ItemStack.of((CompoundTag) item);
                         if (isTool(stack)) {
@@ -156,25 +165,35 @@ public final class BackpackToolSwapper {
             found = false;
         }
         active = found;
+        swords = anySwapsSwords;
         tools = backpackTools;
     }
 
+    private static final int NO_SWAP = 0;
+    private static final int ONLY_TOOLS = 1;
+    private static final int ANY = 2;
+
     /**
-     * @return Whether among these upgrades is a tool swapper that's on and swaps tools
+     * @return How the tool swappers among these upgrades swap, the most they do: not at all, only tools, or any
+     * (swords too)
      */
-    private static boolean swapsTools(CompoundTag upgrades) {
+    private static int swapMode(CompoundTag upgrades) {
+        int mode = NO_SWAP;
         for (Tag entry : upgrades.getList("Items", Tag.TAG_COMPOUND)) {
             CompoundTag upgrade = (CompoundTag) entry;
             if (!TOOL_SWAPPERS.contains(upgrade.getString("id"))) {
                 continue;
             }
             CompoundTag settings = upgrade.getCompound("tag");
-            boolean enabled = !settings.contains("enabled") || settings.getBoolean("enabled");
-            if (enabled && !"noSwap".equals(settings.getString("toolSwapMode"))) {
-                return true;
+            if (settings.contains("enabled") && !settings.getBoolean("enabled")) {
+                continue;
+            }
+            String swapMode = settings.getString("toolSwapMode");
+            if (!swapMode.equals("noSwap")) {
+                mode = Math.max(mode, swapMode.equals("onlyTools") ? ONLY_TOOLS : ANY);
             }
         }
-        return false;
+        return mode;
     }
 
     /**
