@@ -1235,7 +1235,12 @@ public final class BuildPlanner {
             }
             at = stood;
         }
-        List<PlacementModel.Option> options = model.options(pos, desired, world);
+        List<PlacementModel.Option> options = new ArrayList<>(model.options(pos, desired, world));
+        if (options.removeIf(option -> !keepsUp(world, pos, option.result, desired)) && options.isEmpty()) {
+            // (a chain put on its side, coming out sideways when nothing above or below it is there yet: placed later)
+            why.put(pos, "every way to place it now comes out not holding up what's wanted on it");
+            return null;
+        }
         if (options.isEmpty()) {
             why.put(pos, "nothing to place it against that makes it come out right");
             return null;
@@ -1295,6 +1300,34 @@ public final class BuildPlanner {
         stage(plan, choice).steps.add(new Step(Kind.USE, pos, desired, null, false, Collections.emptyList()));
         world.set(pos, desired);
         return choice.stand;
+    }
+
+    /**
+     * @return Whether {@code result} at {@code pos}, where {@code desired} is wanted (differing only in what's let be:
+     * buildIgnoreDirection, buildIgnoreProperties), still holds up what the build wants against it. A chain on its
+     * side holds no lantern hanging under it, which a chain hanging down would
+     */
+    private boolean keepsUp(VirtualWorld world, BlockPos pos, BlockState result, BlockState desired) {
+        if (result.equals(desired)) {
+            return true;
+        }
+        for (Direction dir : Direction.values()) {
+            BlockPos next = pos.relative(dir);
+            BlockState wanted = desired(world, next);
+            if (wanted == null || wanted.isAir()) {
+                continue;
+            }
+            int mark = world.mark();
+            world.set(pos, desired);
+            boolean heldAsWanted = wanted.canSurvive(world.level(), next);
+            world.set(pos, result);
+            boolean held = wanted.canSurvive(world.level(), next);
+            world.revert(mark);
+            if (heldAsWanted && !held) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private BlockPos planFinish(VirtualWorld world, Plan plan, BlockPos pos, BlockState current, BlockState desired, BlockPos at, List<BlockPos> upcoming, Map<BlockPos, String> why) {
