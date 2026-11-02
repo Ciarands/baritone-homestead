@@ -17,6 +17,8 @@
 
 package baritone.utils.accessor;
 
+import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.multiplayer.prediction.PredictiveAction;
 import net.minecraft.core.BlockPos;
 
 public interface IPlayerControllerMP {
@@ -30,4 +32,10 @@ public interface IPlayerControllerMP {
     void callSyncCurrentPlayItem();
 
     void setDestroyDelay(int destroyDelay);
+
+    /**
+     * Sends the packet {@code action} makes, numbered as vanilla numbers its block interactions (for the server's
+     * acknowledgement)
+     */
+    void callStartPrediction(ClientLevel level, PredictiveAction action);
 }

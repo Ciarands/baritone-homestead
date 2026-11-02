@@ -34,10 +34,18 @@ import baritone.api.utils.SettingsUtil;
 import baritone.api.utils.input.Input;
 import baritone.pathing.movement.MovementHelper;
 import baritone.utils.BaritoneProcessHelper;
+import baritone.utils.accessor.IPlayerControllerMP;
+import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.tags.TagKey;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.HoeItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -57,6 +65,7 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -143,6 +152,7 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
         this.range = range;
         active = true;
         locations = null;
+        rightClicks.clear();
     }
 
     private enum Harvest {
@@ -222,6 +232,69 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
 
     private boolean isCocoa(ItemStack stack) {
         return !stack.isEmpty() && stack.getItem().equals(Items.COCOA_BEANS);
+    }
+
+    /**
+     * The Right Click Harvest mod's blocks it leaves alone
+     */
+    private static final TagKey<Block> RIGHT_CLICK_HARVEST_BLACKLIST = TagKey.create(Registries.BLOCK, new ResourceLocation("rightclickharvest", "blacklist"));
+    /**
+     * A ripe crop still there this long after its first right-click is broken instead (the server wants a hoe we don't
+     * have, or food we don't have: its config isn't known here)
+     */
+    private static final int RIGHT_CLICK_GIVE_UP_TICKS = 40;
+    /**
+     * Until the server has answered, the right-click isn't sent again for this long
+     */
+    private static final int RIGHT_CLICK_RESEND_TICKS = 10;
+    private static final int RIGHT_CLICKS_PER_TICK = 4;
+    /**
+     * Ripe crops right-clicked: when first, when last
+     */
+    private final Map<BlockPos, long[]> rightClicks = new HashMap<>();
+    private static Field rightClickHarvestHello;
+    private static boolean noRightClickHarvest;
+
+    /**
+     * @return Whether right-clicking harvests this ripe crop and replants it (the Right Click Harvest mod), rather than
+     * it having to be broken and planted again
+     */
+    private boolean rightClickHarvests(BlockPos pos, BlockState state, long now) {
+        Block block = state.getBlock();
+        long[] clicked = rightClicks.get(pos);
+        return (block instanceof CropBlock || block instanceof CocoaBlock || block instanceof NetherWartBlock)
+                && !state.is(RIGHT_CLICK_HARVEST_BLACKLIST) && (clicked == null || now - clicked[0] < RIGHT_CLICK_GIVE_UP_TICKS)
+                && rightClickHarvestOnServer();
+    }
+
+    /**
+     * Right-clicks a ripe crop by sending the packet a click would: no need to look at it or stand by it, the server
+     * only wants it within reach.
+     */
+    private void sendRightClick(BlockPos pos) {
+        BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(pos), Direction.UP, pos, false);
+        ((IPlayerControllerMP) Minecraft.getInstance().gameMode).callStartPrediction(ctx.player().clientLevel,
+                sequence -> new ServerboundUseItemOnPacket(InteractionHand.MAIN_HAND, hit, sequence));
+    }
+
+    /**
+     * @return Whether the server runs Right Click Harvest too (it greets clients that have it; the integrated server as well)
+     */
+    private static boolean rightClickHarvestOnServer() {
+        if (noRightClickHarvest) {
+            return false;
+        }
+        try {
+            if (rightClickHarvestHello == null) {
+                Field hello = Class.forName("io.github.jamalam360.rightclickharvest.RightClickHarvestClient").getDeclaredField("serverHasSaidHello");
+                hello.setAccessible(true);
+                rightClickHarvestHello = hello;
+            }
+            return rightClickHarvestHello.getBoolean(null);
+        } catch (ReflectiveOperationException | LinkageError | RuntimeException e) {
+            noRightClickHarvest = true; // not installed
+            return false;
+        }
     }
 
     @Override
@@ -304,9 +377,33 @@ public final class FarmProcess extends BaritoneProcessHelper implements IFarmPro
         baritone.getInputOverrideHandler().clearAllKeys();
         BetterBlockPos playerPos = ctx.playerFeet();
         double blockReachDistance = ctx.playerController().getBlockReachDistance();
+        long now = ctx.world().getGameTime();
+        rightClicks.keySet().removeIf(pos -> !readyForHarvest(ctx.world(), pos, ctx.world().getBlockState(pos)));
+        int rightClicked = 0;
         for (BlockPos pos : toBreak) {
-            if (playerPos.distSqr(pos) > blockReachDistance * blockReachDistance) {
+            if (rightClicked == RIGHT_CLICKS_PER_TICK || ctx.player().getEyePosition().distanceToSqr(Vec3.atCenterOf(pos)) > blockReachDistance * blockReachDistance
+                    || !rightClickHarvests(pos, ctx.world().getBlockState(pos), now)) {
                 continue;
+            }
+            long[] clicked = rightClicks.computeIfAbsent(pos.immutable(), p -> new long[]{now, Long.MIN_VALUE / 2});
+            if (now - clicked[1] < RIGHT_CLICK_RESEND_TICKS) {
+                continue;
+            }
+            if (rightClicked == 0) {
+                // a hoe meets requireHoe, and reaches the crops round it too
+                baritone.getInventoryBehavior().throwaway(true, stack -> stack.getItem() instanceof HoeItem);
+                ctx.playerController().syncHeldItem();
+            }
+            sendRightClick(pos);
+            clicked[1] = now;
+            rightClicked++;
+        }
+        if (rightClicked > 0) {
+            return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+        }
+        for (BlockPos pos : toBreak) {
+            if (playerPos.distSqr(pos) > blockReachDistance * blockReachDistance || rightClickHarvests(pos, ctx.world().getBlockState(pos), now)) {
+                continue; // (right-clicked crops are left to the server)
             }
             Optional<Rotation> rot = RotationUtils.reachable(ctx, pos);
             if (rot.isPresent() && isSafeToCancel) {
