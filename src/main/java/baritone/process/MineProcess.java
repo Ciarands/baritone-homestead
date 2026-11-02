@@ -40,6 +40,7 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.LeavesBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -155,6 +156,9 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         if (stillBreaking != null) {
             return stillBreaking;
         }
+        if (!isActive()) {
+            return null; // stopped: nothing to get them with
+        }
         // Locations blacklisted as unreachable were only unreachable from where we stood. Once we've moved away,
         // give them another chance, otherwise reachable targets are thrown away for good; but not endlessly: one
         // that failed from several places is sealed off (in someone's wall, encased), and each retry costs a search.
@@ -221,8 +225,12 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         // drops inside dense veins until nothing was in reach anymore (and with drops right next to us, in pockets we
         // can't step into, they're left alone: we'd only stand there). Unless what's around us is still thick with
         // targets (a canopy of leaves, pillared up to): then they wait, it's no use climbing down and back up for them.
-        dropsWait = dropsCanWait();
-        List<BlockPos> drops = settledDropsNearby();
+        // Getting old (they're gone at five minutes), they're collected whatever's left to do, and from further off:
+        // the ground under a canopy is more than a few blocks down
+        List<BlockPos> old = settledDrops(OLD_DROP_DISTANCE_SQ, DROP_WAIT_MAX_AGE);
+        dropsWait = old.isEmpty() && dropsCanWait();
+        List<BlockPos> drops = new ArrayList<>(settledDrops(NEARBY_DROP_DISTANCE_SQ, SETTLED_DROP_AGE));
+        drops.addAll(old);
         if (!drops.isEmpty() && !Baritone.settings().legitMine.value && !dropsWait) {
             collectingDrops = drops;
             return new PathingCommand(new GoalComposite(drops.stream().map(GoalTwoBlocks::new).toArray(Goal[]::new)), PathingCommandType.REVALIDATE_GOAL_AND_PATH);
@@ -244,6 +252,9 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             PathingCommand breakingIt = keepBreaking();
             if (breakingIt != null) {
                 return breakingIt;
+            }
+            if (!isActive()) {
+                return null; // stopped: nothing to get them with
             }
             // nothing to break there after all (no point of it to aim at, it changed, given up on): on to a goal,
             // never no command while active (that's a crash)
@@ -294,7 +305,16 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             return null;
         }
         baritone.getInputOverrideHandler().clearAllKeys();
-        MovementHelper.switchToBestToolFor(ctx, state);
+        // with something that gets it: leaves broken with anything but shears (a fast enchanted hoe, a bare hand once
+        // the shears are down to what itemSaver keeps) are just gone
+        Block block = state.getBlock();
+        if (!MovementHelper.switchToBestToolFor(ctx, state, stack -> BlockOptionalMeta.dropsWith(block, stack))) {
+            logDirect("Stopped: nothing in the hotbar gets anything out of " + block.getName().getString() + " (it needs shears or silk touch, say"
+                    + (Baritone.settings().itemSaver.value ? "; itemSaver leaves a tool's last " + Baritone.settings().itemSaverThreshold.value + " uses alone" : "") + ")");
+            breaking = null;
+            cancel();
+            return null;
+        }
         if (ctx.isLookingAt(breaking)) {
             // on it already: stay exactly as we are. Re-aiming every tick (at whichever point of it is worked out from
             // where we stand now) flicks between its faces, and off its edge onto the next block
@@ -586,6 +606,10 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
      */
     private static final int DROP_WAIT_MAX_AGE = 20 * 120;
     /**
+     * How far off old drops are gone for (the ground under a canopy, from up in it)
+     */
+    private static final double OLD_DROP_DISTANCE_SQ = 32 * 32;
+    /**
      * With fewer free slots, drops are collected (and room's kept) rather than left for later
      */
     private static final int DROP_WAIT_MIN_FREE_SLOTS = 3;
@@ -595,20 +619,13 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
     private boolean dropsWait;
 
     /**
-     * @return Whether drops can be left for later: what's around us is still thick with targets, no drop is getting
-     * old, and there's room. Coming down from up high for the first few drops and going back up costs more than
-     * it saves, every time
+     * @return Whether drops can be left for later: what's around us is still thick with targets, and there's room.
+     * Coming down from up high for the first few drops and going back up costs more than it saves, every time
      */
     private boolean dropsCanWait() {
         Inventory inv = ctx.player().getInventory();
         if (inv.items.stream().filter(ItemStack::isEmpty).count() < DROP_WAIT_MIN_FREE_SLOTS) {
             return false;
-        }
-        for (Entity entity : ((ClientLevel) ctx.world()).entitiesForRendering()) {
-            if (entity instanceof ItemEntity && ((ItemEntity) entity).getAge() > DROP_WAIT_MAX_AGE && isTargetDrop(((ItemEntity) entity).getItem())
-                    && entity.distanceToSqr(ctx.player()) <= NEARBY_DROP_DISTANCE_SQ * 4) {
-                return false;
-            }
         }
         BlockPos feet = ctx.playerFeet();
         int dense = 0;
@@ -622,9 +639,10 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
 
 
     /**
-     * @return Positions of settled target drops within a few blocks, that there's room for, worth walking to
+     * @return Positions of settled target drops at least {@code minAge} ticks old within {@code maxDistSq}, that
+     * there's room for, worth walking to
      */
-    private List<BlockPos> settledDropsNearby() {
+    private List<BlockPos> settledDrops(double maxDistSq, int minAge) {
         if (!Baritone.settings().mineScanDroppedItems.value) {
             return Collections.emptyList();
         }
@@ -636,7 +654,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             }
             ItemEntity item = (ItemEntity) entity;
             double distSq = item.distanceToSqr(ctx.player());
-            if (item.getAge() >= SETTLED_DROP_AGE && distSq > PICKUP_DISTANCE_SQ && distSq <= NEARBY_DROP_DISTANCE_SQ
+            if (item.getAge() >= minAge && distSq > PICKUP_DISTANCE_SQ && distSq <= maxDistSq
                     && !blacklist.contains(item.blockPosition()) && isTargetDrop(item.getItem())
                     && (inv.getFreeSlot() != -1 || inv.getSlotWithRemainingSpace(item.getItem()) != -1)) {
                 ret.add(item.blockPosition());
@@ -848,6 +866,15 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
     public boolean isTarget(BlockState state) {
         BlockOptionalMetaLookup filter = this.filter; // read once: it's cleared on the main thread when mining stops
         return filter != null && filter.has(state);
+    }
+
+    /**
+     * @return Whether what's being mined includes leaves, that decay without a log near (and then come down as
+     * saplings and sticks, not as the leaves): the logs holding them up are best left standing
+     */
+    public boolean minesLeaves() {
+        BlockOptionalMetaLookup filter = this.filter;
+        return filter != null && filter.blocks().stream().anyMatch(bom -> bom.getBlock() instanceof LeavesBlock);
     }
 
     private BlockOptionalMetaLookup filterFilter() {

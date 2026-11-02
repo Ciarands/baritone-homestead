@@ -35,6 +35,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.Level;
@@ -62,6 +63,7 @@ import net.minecraft.world.phys.Vec3;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 import static baritone.api.utils.RotationUtils.DEG_TO_RAD_F;
@@ -705,15 +707,47 @@ public interface MovementHelper extends ActionCosts, Helper {
      */
     static void switchToBestToolFor(IPlayerContext ctx, BlockState b, ToolSet ts, boolean preferSilkTouch) {
         if (Baritone.settings().autoTool.value && !Baritone.settings().assumeExternalAutoTool.value) {
-            Inventory inv = ctx.player().getInventory();
-            inv.selected = ts.getBestSlot(b.getBlock(), preferSilkTouch);
-            if (!BackpackToolSwapper.isTool(inv.getSelected()) && BackpackToolSwapper.active(ctx.player())) {
-                // a backpack's tool swapper swaps a tool in hand for its best one, and nothing else: hold one
-                for (int slot = 0; slot < 9; slot++) {
-                    if (BackpackToolSwapper.isTool(inv.getItem(slot))) {
-                        inv.selected = slot;
-                        break;
-                    }
+            // in the way and one of what's being mined: with something that gets it, if there's anything (a fast hoe
+            // through a canopy of leaves being sheared would leave nothing of them)
+            IBaritone baritone = BaritoneAPI.getProvider().getBaritoneForPlayer(ctx.player());
+            if (baritone instanceof Baritone && ((Baritone) baritone).getMineProcess().isTarget(b)) {
+                Block block = b.getBlock();
+                int getting = ts.getBestSlot(block, preferSilkTouch, false, stack -> BlockOptionalMeta.dropsWith(block, stack));
+                if (getting >= 0) {
+                    select(ctx, getting);
+                    return;
+                }
+            }
+            select(ctx, ts.getBestSlot(b.getBlock(), preferSilkTouch));
+        }
+    }
+
+    /**
+     * AutoTool for a specific block, from what's {@code usable} only
+     *
+     * @return Whether there's something usable for it (without auto tool, whatever's held is)
+     */
+    static boolean switchToBestToolFor(IPlayerContext ctx, BlockState b, Predicate<ItemStack> usable) {
+        if (!Baritone.settings().autoTool.value || Baritone.settings().assumeExternalAutoTool.value) {
+            return true;
+        }
+        int slot = new ToolSet(ctx.player()).getBestSlot(b.getBlock(), BaritoneAPI.getSettings().preferSilkTouch.value, false, usable);
+        if (slot < 0) {
+            return false;
+        }
+        select(ctx, slot);
+        return true;
+    }
+
+    private static void select(IPlayerContext ctx, int slot) {
+        Inventory inv = ctx.player().getInventory();
+        inv.selected = slot;
+        if (!BackpackToolSwapper.isTool(inv.getSelected()) && BackpackToolSwapper.active(ctx.player())) {
+            // a backpack's tool swapper swaps a tool in hand for its best one, and nothing else: hold one
+            for (int i = 0; i < 9; i++) {
+                if (BackpackToolSwapper.isTool(inv.getItem(i))) {
+                    inv.selected = i;
+                    break;
                 }
             }
         }

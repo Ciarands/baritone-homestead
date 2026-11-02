@@ -33,6 +33,7 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
@@ -87,6 +88,10 @@ public class CalculationContext {
     private final LongSet claimedByOthers;
     private final boolean avoidBreakingBlockEntities;
     private final MineProcess mineProcess;
+    /**
+     * Mining leaves: logs that aren't being mined too stay, the leaves round them decay without
+     */
+    private final boolean keepLogs;
 
     public final PrecomputedData precomputedData;
 
@@ -143,6 +148,7 @@ public class CalculationContext {
                 : LongSets.EMPTY_SET;
         this.avoidBreakingBlockEntities = Baritone.settings().avoidBreakingBlockEntities.value;
         this.mineProcess = ((Baritone) baritone).getMineProcess();
+        this.keepLogs = mineProcess != null && mineProcess.minesLeaves();
     }
 
     public final IBaritone getBaritone() {
@@ -193,6 +199,10 @@ public class CalculationContext {
         }
         // someone's storage, machine, bed, grave...: only break it if it's what we're mining
         if (avoidBreakingBlockEntities && current.hasBlockEntity() && !allowBreakAnyway.contains(current.getBlock()) && !mineProcess.isTarget(current)) {
+            return COST_INF;
+        }
+        // mining leaves, breaking the logs in the way leaves the leaves round them to decay (into saplings and sticks)
+        if (keepLogs && current.is(BlockTags.LOGS) && !mineProcess.isTarget(current)) {
             return COST_INF;
         }
         return 1;

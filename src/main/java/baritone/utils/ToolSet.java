@@ -34,6 +34,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * A cached list of the best tools on the hotbar for any block
@@ -119,6 +120,15 @@ public class ToolSet {
     }
 
     public int getBestSlot(Block b, boolean preferSilkTouch, boolean pathingCalculation) {
+        int best = getBestSlot(b, preferSilkTouch, pathingCalculation, stack -> true);
+        return best < 0 ? 0 : best;
+    }
+
+    /**
+     * @param usable What may be used (that gets something out of it, say)
+     * @return The best slot of those, -1 if there's none
+     */
+    public int getBestSlot(Block b, boolean preferSilkTouch, boolean pathingCalculation, Predicate<ItemStack> usable) {
 
         /*
         If we actually want know what efficiency our held item has instead of the best one
@@ -128,7 +138,7 @@ public class ToolSet {
             return player.getInventory().selected;
         }
 
-        int best = 0;
+        int best = -1;
         double highestSpeed = Double.NEGATIVE_INFINITY;
         int lowestCost = Integer.MIN_VALUE;
         boolean bestSilkTouch = false;
@@ -138,7 +148,9 @@ public class ToolSet {
             if (!Baritone.settings().useSwordToMine.value && itemStack.is(ItemTags.SWORDS)) {
                 continue;
             }
-
+            if (!usable.test(itemStack)) {
+                continue;
+            }
             if (Baritone.settings().itemSaver.value && (itemStack.getDamageValue() + Baritone.settings().itemSaverThreshold.value) >= itemStack.getMaxDamage() && itemStack.getMaxDamage() > 1) {
                 continue;
             }

@@ -43,6 +43,7 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.level.CustomSpawner;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
@@ -82,6 +83,8 @@ public final class BlockOptionalMeta {
     private final ImmutableSet<Integer> stackHashes;
     private static LootDataManager lootTables;
     private static Map<Block, List<Item>> drops = new HashMap<>();
+    private static final Map<Block, Boolean> needsTool = new HashMap<>();
+    private static final Map<Block, Map<String, Boolean>> dropsWith = new HashMap<>();
 
     public BlockOptionalMeta(@Nonnull Block block) {
         this.block = block;
@@ -352,6 +355,67 @@ public final class BlockOptionalMeta {
             items.remove(Items.AIR);
             return List.copyOf(items);
         });
+    }
+
+    /**
+     * Rolls per tool for {@link #needsTool}/{@link #dropsWith}
+     */
+    private static final int TOOL_ROLLS = 8;
+
+    /**
+     * @return Whether {@code block} needs a particular tool to get anything out of it: by hand it mostly drops
+     * nothing, and some tool does better (leaves and grass need shears, glass silk touch). Broken with anything
+     * else it's just gone
+     */
+    public static synchronized boolean needsTool(Block block) {
+        return needsTool.computeIfAbsent(block, b -> !mostlyDrops(b, ItemStack.EMPTY) && lootTools().stream().anyMatch(tool -> mostlyDrops(b, tool)));
+    }
+
+    /**
+     * @return Whether breaking {@code block} with {@code tool} gets something out of it (always, if it doesn't need
+     * a particular tool)
+     */
+    public static synchronized boolean dropsWith(Block block, ItemStack tool) {
+        if (!needsTool(block)) {
+            return true;
+        }
+        String kind = BuiltInRegistries.ITEM.getKey(tool.getItem()) + (EnchantmentHelper.getItemEnchantmentLevel(Enchantments.SILK_TOUCH, tool) > 0 ? "+silk" : "");
+        return dropsWith.computeIfAbsent(block, b -> new HashMap<>()).computeIfAbsent(kind, k -> mostlyDrops(block, tool));
+    }
+
+    /**
+     * @return Whether at least half the loot rolls of {@code block} broken with {@code tool} drop something. A roll
+     * that can't be done here (a modded loot function needing a real server) counts as dropping: unknown isn't nothing
+     */
+    private static boolean mostlyDrops(Block block, ItemStack tool) {
+        ResourceLocation lootTableLocation = block.getLootTable();
+        if (lootTableLocation == BuiltInLootTables.EMPTY) {
+            return false;
+        }
+        int dropping = 0;
+        for (int seed = 0; seed < TOOL_ROLLS; seed++) {
+            boolean[] dropped = {false};
+            try {
+                getManager().getLootTable(lootTableLocation).getRandomItemsRaw(
+                        new LootContext.Builder(
+                                new LootParams.Builder(ServerLevelStub.fastCreate())
+                                        .withParameter(LootContextParams.ORIGIN, Vec3.atLowerCornerOf(BlockPos.ZERO))
+                                        .withParameter(LootContextParams.TOOL, tool)
+                                        .withOptionalParameter(LootContextParams.BLOCK_ENTITY, null)
+                                        .withParameter(LootContextParams.BLOCK_STATE, block.defaultBlockState())
+                                        .create(LootContextParamSets.BLOCK)
+                        ).withOptionalRandomSeed(seed)
+                                .create(null),
+                        stack -> dropped[0] |= !stack.isEmpty()
+                );
+            } catch (Exception e) {
+                dropped[0] = true;
+            }
+            if (dropped[0]) {
+                dropping++;
+            }
+        }
+        return dropping * 2 >= TOOL_ROLLS;
     }
 
     private static class ServerLevelStub extends ServerLevel {
