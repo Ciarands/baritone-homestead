@@ -21,6 +21,7 @@ import baritone.Baritone;
 import baritone.api.schematic.ISchematic;
 import baritone.api.utils.IPlayerContext;
 import baritone.pathing.movement.MovementHelper;
+import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -130,7 +131,11 @@ public final class BuildPlanner {
         public final Map<BlockPos, String> waiting = new LinkedHashMap<>();
         public long micros;
         /**
-         * How many places to stand the walking model reached from the player when this was planned
+         * Of which working out where the player can get to
+         */
+        public long reachMicros;
+        /**
+         * How many places to stand the walking model was followed out to from the player, for this plan's questions
          */
         public int reachable;
         /**
@@ -157,8 +162,8 @@ public final class BuildPlanner {
 
         public String summary() {
             return phase + (layer != Integer.MIN_VALUE ? " y=" + layer : "") + ": " + steps() + " steps from " + stages.size() + " stands"
-                    + (waiting.isEmpty() ? "" : ", " + waiting.size() + " waiting") + ", " + reachable + " places reachable" + (trusted ? "" : " (not trusted)")
-                    + " (" + micros / 1000 + "ms)";
+                    + (waiting.isEmpty() ? "" : ", " + waiting.size() + " waiting") + ", " + reachable + " places reached" + (trusted ? "" : " (not trusted)")
+                    + " (" + micros / 1000 + "ms, reach " + reachMicros / 1000 + "ms)";
         }
 
         public List<String> describe() {
@@ -240,7 +245,7 @@ public final class BuildPlanner {
 
     public void badStand(BlockPos stand) {
         badStands.add(stand);
-        if (reachable != null && !reachable.contains(stand.asLong())) {
+        if (reach != null && !reach.reaches(stand)) {
             // the walking model said it couldn't be got to, and it couldn't: believe it from now on
             trustReach = true;
         }
@@ -251,9 +256,11 @@ public final class BuildPlanner {
      * about a build (see BuildPathContext): walking, stepping up one, dropping up to three, climbing ladders and vines,
      * digging through anything that isn't a finished part of the build, and pillaring or bridging with throwaway blocks
      * where the build wants nothing. Stands elsewhere are disfavoured, and left out once a path to one has failed: a
-     * room closed off by the build itself (iron doors, walls up) isn't got into, and every try costs a path search
+     * room closed off by the build itself (iron doors, walls up) isn't got into, and every try costs a path search.
+     * Followed out only as far as the questions asked of it need: near the player that's quick, where the whole
+     * build and its surroundings would take seconds every plan
      */
-    private LongOpenHashSet reachable;
+    private Flood reach;
     private boolean trustReach;
     /**
      * The pathfinder kept failing to get where the full model said it could: from then on stands reached only by
@@ -282,78 +289,150 @@ public final class BuildPlanner {
     private static final int MAX_DROP = 3;
     private static final double UNREACHABLE_PENALTY = 40;
 
+    /**
+     * How long the last {@link #computeReachable} took
+     */
+    private long reachMicros;
+
     private void computeReachable(VirtualWorld world, BlockPos from) {
-        reachable = new LongOpenHashSet();
-        flood(world, from, reachable, null, Integer.MAX_VALUE);
+        // of the world as it is now: the plan goes on changing it
+        reach = new Flood(world.snapshot(), from);
+        reachMicros = 0;
     }
 
     /**
-     * Follows the walking model out from {@code from}, within the build and a margin round it, into {@code seen}
-     *
-     * @param goal Stops at the first place it accepts; null to go on until there's nowhere more
-     * @param cap  Stops when this many places are reached
-     * @return Whether it stopped at a goal or the cap, rather than running out of places
+     * Follows the walking model out from a place, within the build and a margin round it, as far as it's asked to
+     * go. Taken up again where it left off when asked something further: what it's found is the same either way
      */
-    private boolean flood(VirtualWorld world, BlockPos from, LongOpenHashSet seen, Predicate<BlockPos> goal, int cap) {
-        int minX = origin.getX() - REACH_MARGIN, maxX = origin.getX() + schematic.widthX() + REACH_MARGIN;
-        int minY = origin.getY() - REACH_MARGIN, maxY = origin.getY() + schematic.heightY() + REACH_MARGIN;
-        int minZ = origin.getZ() - REACH_MARGIN, maxZ = origin.getZ() + schematic.lengthZ() + REACH_MARGIN;
-        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
-        for (BlockPos seed : new BlockPos[]{from, from.above(), from.below()}) {
-            // where the player is counts, standable as the model sees it or not (mid-step, on something odd)
-            if ((seed == from || standable(world, seed)) && seen.add(seed.asLong())) {
-                if (goal != null && goal.test(seed)) {
-                    return true;
+    private final class Flood {
+
+        private final VirtualWorld world;
+        final LongOpenHashSet seen = new LongOpenHashSet();
+        private final ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        /**
+         * Where it started from: the place itself, and above and below it if they can be stood in
+         */
+        final List<BlockPos> seeds = new ArrayList<>();
+        // each cell is looked at from many neighbours (as a step, the cell above one, a drop): worked out once each
+        private final Long2ByteOpenHashMap clearMemo = new Long2ByteOpenHashMap();
+        private final Long2ByteOpenHashMap supportMemo = new Long2ByteOpenHashMap();
+        private final int minX, maxX, minY, maxY, minZ, maxZ;
+
+        Flood(VirtualWorld world, BlockPos from) {
+            this.world = world;
+            minX = origin.getX() - REACH_MARGIN;
+            maxX = origin.getX() + schematic.widthX() + REACH_MARGIN;
+            minY = origin.getY() - REACH_MARGIN;
+            maxY = origin.getY() + schematic.heightY() + REACH_MARGIN;
+            minZ = origin.getZ() - REACH_MARGIN;
+            maxZ = origin.getZ() + schematic.lengthZ() + REACH_MARGIN;
+            for (BlockPos seed : new BlockPos[]{from, from.above(), from.below()}) {
+                // where the player is counts, standable as the model sees it or not (mid-step, on something odd)
+                if ((seed == from || stand(seed)) && seen.add(seed.asLong())) {
+                    seeds.add(seed);
+                    queue.add(seed);
                 }
-                queue.add(seed);
             }
         }
-        while (!queue.isEmpty()) {
-            if (seen.size() >= cap) {
-                return true;
+
+        /**
+         * @return Whether the walking model gets to {@code pos}: followed out as far as it takes to know
+         */
+        boolean reaches(BlockPos pos) {
+            long key = pos.asLong();
+            if (!seen.contains(key)) {
+                if (!inBox(pos) || !clear(pos) || !clear(pos.above())) {
+                    // never anywhere the model gets to: each place it takes (to stand in, or pillar up through) has
+                    // room for the player, in its box. No following it all the way out to know that
+                    return false;
+                }
+                long start = System.nanoTime();
+                expand(p -> p.asLong() == key, Integer.MAX_VALUE);
+                reachMicros += (System.nanoTime() - start) / 1000;
             }
-            BlockPos n = queue.poll();
-            List<BlockPos> next = new ArrayList<>();
-            boolean headroom = clearable(world, n.above(2));
-            // up: climbing, or pillaring, which puts a block where the feet were (stone that was dug through to get
-            // here is gone by then, it doesn't hold anyone up)
-            BlockPos up = n.above();
-            if (headroom && inBox(up, minX, maxX, minY, maxY, minZ, maxZ) && !seen.contains(up.asLong())
-                    && clearable(world, up) && (climbable(world, n) || climbable(world, up) || (!strictReach && mayPlace(world, n, true)))) {
-                seen.add(up.asLong());
-                if (goal != null && goal.test(up)) {
+            return seen.contains(key);
+        }
+
+        /**
+         * Follows the model on out, a place at a time, each one's neighbours all looked at before stopping (so it can
+         * be taken up again)
+         *
+         * @param goal Stops once a place it accepts is reached
+         * @param cap  Stops once this many places are reached
+         * @return Whether it stopped at a goal or the cap, rather than running out of places
+         */
+        boolean expand(Predicate<BlockPos> goal, int cap) {
+            while (!queue.isEmpty()) {
+                if (seen.size() >= cap) {
                     return true;
                 }
-                queue.add(up);
-            }
-            next.add(n.below()); // climbing down, or digging down
-            for (Direction dir : Direction.Plane.HORIZONTAL) {
-                BlockPos side = n.relative(dir);
-                if (headroom) {
-                    next.add(side.above());
+                BlockPos n = queue.poll();
+                boolean found = false;
+                List<BlockPos> next = new ArrayList<>();
+                boolean headroom = clear(n.above(2));
+                // up: climbing, or pillaring, which puts a block where the feet were (stone that was dug through to
+                // get here is gone by then, it doesn't hold anyone up)
+                BlockPos up = n.above();
+                if (headroom && inBox(up) && !seen.contains(up.asLong())
+                        && clear(up) && (climbable(world, n) || climbable(world, up) || (!strictReach && mayPlace(world, n, true)))) {
+                    found |= add(up, goal);
                 }
-                if (!clearable(world, side) || !clearable(world, side.above())) {
-                    continue;
-                }
-                next.add(side);
-                for (int drop = 1; drop <= MAX_DROP && clearable(world, side.below(drop)); drop++) {
-                    next.add(side.below(drop));
-                }
-            }
-            for (BlockPos t : next) {
-                if (!inBox(t, minX, maxX, minY, maxY, minZ, maxZ)) {
-                    continue;
-                }
-                if (!seen.contains(t.asLong()) && standable(world, t)) {
-                    seen.add(t.asLong());
-                    if (goal != null && goal.test(t)) {
-                        return true;
+                next.add(n.below()); // climbing down, or digging down
+                for (Direction dir : Direction.Plane.HORIZONTAL) {
+                    BlockPos side = n.relative(dir);
+                    if (headroom) {
+                        next.add(side.above());
                     }
-                    queue.add(t);
+                    if (!clear(side) || !clear(side.above())) {
+                        continue;
+                    }
+                    next.add(side);
+                    for (int drop = 1; drop <= MAX_DROP && clear(side.below(drop)); drop++) {
+                        next.add(side.below(drop));
+                    }
+                }
+                for (BlockPos t : next) {
+                    if (inBox(t) && !seen.contains(t.asLong()) && stand(t)) {
+                        found |= add(t, goal);
+                    }
+                }
+                if (found) {
+                    return true;
                 }
             }
+            return false;
         }
-        return false;
+
+        private boolean add(BlockPos pos, Predicate<BlockPos> goal) {
+            seen.add(pos.asLong());
+            queue.add(pos);
+            return goal.test(pos);
+        }
+
+        private boolean inBox(BlockPos t) {
+            return t.getX() >= minX && t.getX() <= maxX && t.getY() >= minY && t.getY() <= maxY && t.getZ() >= minZ && t.getZ() <= maxZ;
+        }
+
+        private boolean clear(BlockPos pos) {
+            return memo(clearMemo, pos, p -> clearable(world, p));
+        }
+
+        private boolean stand(BlockPos pos) {
+            return clear(pos) && clear(pos.above()) && (memo(supportMemo, pos.below(), p -> supportable(world, p)) || climbable(world, pos));
+        }
+    }
+
+    /**
+     * @return {@code test} of {@code pos}, worked out once per position into {@code memo}
+     */
+    private static boolean memo(Long2ByteOpenHashMap memo, BlockPos pos, Predicate<BlockPos> test) {
+        long key = pos.asLong();
+        byte known = memo.get(key);
+        if (known == 0) {
+            known = test.test(pos) ? (byte) 1 : (byte) 2;
+            memo.put(key, known);
+        }
+        return known == 1;
     }
 
     /**
@@ -377,8 +456,9 @@ public final class BuildPlanner {
     private boolean canLeave(VirtualWorld world, BlockPos stand) {
         int minX = origin.getX(), maxX = origin.getX() + schematic.widthX() - 1;
         int minZ = origin.getZ(), maxZ = origin.getZ() + schematic.lengthZ() - 1;
-        return flood(world, stand, new LongOpenHashSet(), p -> p.distManhattan(planFrom) <= 1
-                || p.getX() < minX || p.getX() > maxX || p.getZ() < minZ || p.getZ() > maxZ, WAY_OUT_CAP);
+        Predicate<BlockPos> out = p -> p.distManhattan(planFrom) <= 1 || p.getX() < minX || p.getX() > maxX || p.getZ() < minZ || p.getZ() > maxZ;
+        Flood flood = new Flood(world, stand);
+        return flood.seeds.stream().anyMatch(out) || flood.expand(out, WAY_OUT_CAP);
     }
 
     private boolean passable(VirtualWorld world, BlockPos pos) {
@@ -436,10 +516,6 @@ public final class BuildPlanner {
                 && (desired == null || desired.getBlock() instanceof AirBlock);
     }
 
-    private static boolean inBox(BlockPos t, int minX, int maxX, int minY, int maxY, int minZ, int maxZ) {
-        return t.getX() >= minX && t.getX() <= maxX && t.getY() >= minY && t.getY() <= maxY && t.getZ() >= minZ && t.getZ() <= maxZ;
-    }
-
     private boolean standable(VirtualWorld world, BlockPos pos) {
         return clearable(world, pos) && clearable(world, pos.above())
                 && (supportable(world, pos.below()) || climbable(world, pos));
@@ -450,20 +526,20 @@ public final class BuildPlanner {
      * pillar up to, a reachable cell next to it or (pillar) under it
      */
     private boolean reachableStand(BlockPos feet, String how) {
-        if (reachable == null || reachable.contains(feet.asLong())) {
+        if (reach == null || reach.reaches(feet)) {
             return true;
         }
         if (how.equals("stand")) {
             return false;
         }
         for (Direction dir : Direction.values()) {
-            if (reachable.contains(feet.relative(dir).asLong())) {
+            if (reach.reaches(feet.relative(dir))) {
                 return true;
             }
         }
         if (how.startsWith("pillar")) {
             int height = Integer.parseInt(how.substring("pillar ".length()));
-            return reachable.contains(feet.below(height).asLong());
+            return reach.reaches(feet.below(height));
         }
         return false;
     }
@@ -496,7 +572,8 @@ public final class BuildPlanner {
         this.throwaway = throwaway;
         Plan plan = plan(world, from, litter);
         plan.micros = (System.nanoTime() - start) / 1000;
-        plan.reachable = reachable.size();
+        plan.reachable = reach.seen.size();
+        plan.reachMicros = reachMicros;
         plan.trusted = trustReach;
         return plan;
     }
