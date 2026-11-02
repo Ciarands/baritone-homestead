@@ -65,7 +65,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
     @Override
     public void updateTarget(Rotation rotation, boolean blockInteract) {
-        this.target = new Target(rotation, Target.Mode.resolve(ctx, blockInteract));
+        this.target = new Target(rotation, Target.Mode.resolve(ctx, blockInteract), blockInteract);
     }
 
     @Override
@@ -95,7 +95,9 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 }
 
                 this.prevRotation = new Rotation(ctx.player().getYRot(), ctx.player().getXRot());
-                final Rotation actual = this.processor.peekRotation(this.target.rotation);
+                // aiming at a block to break or place it must hit it: the anti-cheat jitter (a degree or two of yaw)
+                // slides the crosshair off a block's edge, onto whatever is next to it
+                final Rotation actual = this.target.blockInteract ? this.processor.peekExactRotation(this.target.rotation) : this.processor.peekRotation(this.target.rotation);
                 ctx.player().setYRot(actual.getYaw());
                 ctx.player().setXRot(actual.getPitch());
                 break;
@@ -229,6 +231,16 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             ).clamp();
         }
 
+        /**
+         * {@link #peekRotation} without the random looking
+         */
+        public final Rotation peekExactRotation(final Rotation rotation) {
+            return new Rotation(
+                    this.calculateMouseMove(this.getPrevRotation().getYaw(), rotation.getYaw()),
+                    this.calculateMouseMove(this.getPrevRotation().getPitch(), rotation.getPitch())
+            ).clamp();
+        }
+
         @Override
         public final void tick() {
             // randomLooking
@@ -311,10 +323,15 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
         public final Rotation rotation;
         public final Mode mode;
+        /**
+         * Aiming at a block to break or place it
+         */
+        public final boolean blockInteract;
 
-        public Target(Rotation rotation, Mode mode) {
+        public Target(Rotation rotation, Mode mode, boolean blockInteract) {
             this.rotation = rotation;
             this.mode = mode;
+            this.blockInteract = blockInteract;
         }
 
         enum Mode {

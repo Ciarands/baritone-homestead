@@ -43,6 +43,8 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -148,6 +150,11 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                 return null;
             }
         }
+        // a block being broken is kept at, before anything else: letting go for a tick starts it over
+        PathingCommand stillBreaking = keepBreaking();
+        if (stillBreaking != null) {
+            return stillBreaking;
+        }
         // Locations blacklisted as unreachable were only unreachable from where we stood. Once we've moved away,
         // give them another chance, otherwise reachable targets are thrown away for good; but not endlessly: one
         // that failed from several places is sealed off (in someone's wall, encased), and each retry costs a search.
@@ -228,14 +235,11 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                 .min(Comparator.comparingDouble(pos -> pos.distToCenterSqr(ctx.playerHead())));
         baritone.getInputOverrideHandler().clearAllKeys();
         if (inReach.isPresent() && ctx.player().onGround() && isSafeToCancel) {
-            BlockPos pos = inReach.get();
-            Rotation rot = RotationUtils.reachable(ctx, pos).get();
-            baritone.getLookBehavior().updateTarget(rot, true);
-            MovementHelper.switchToBestToolFor(ctx, ctx.world().getBlockState(pos));
-            if (ctx.isLookingAt(pos) || ctx.playerRotations().isReallyCloseTo(rot)) {
-                baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
+            if (!inReach.get().equals(breaking)) {
+                breaking = inReach.get();
+                breakingSince = ctx.world().getGameTime();
             }
-            return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+            return keepBreaking();
         }
 
         PathingCommand command = updateGoal();
@@ -246,6 +250,61 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             return null;
         }
         return command;
+    }
+
+    /**
+     * The block being broken, kept at until it's gone. Breaking only gets anywhere while the button stays held on the
+     * one block: a tick off it (knocked off the ground by a hit, going for drops, a nearer target, the path) starts it
+     * over, which never finishes a slow block (a tree's base with Falling Trees takes seconds).
+     */
+    private BlockPos breaking;
+    private long breakingSince;
+    /**
+     * Kept at for this long, a block is given up on (and blacklisted): it isn't coming down
+     */
+    private static final int BREAKING_GIVE_UP_TICKS = 20 * 30;
+
+    /**
+     * Keeps breaking {@link #breaking}, whatever else there'd be to do: until it's gone or out of reach
+     *
+     * @return The command to keep at it, or null if there's nothing to keep breaking
+     */
+    private PathingCommand keepBreaking() {
+        if (breaking == null) {
+            return null;
+        }
+        BlockState state = ctx.world().getBlockState(breaking);
+        Optional<Rotation> reachable = RotationUtils.reachable(ctx, breaking);
+        if (state.isAir() || !filter.has(state) || reachable.isEmpty()) {
+            breaking = null; // broken, or there's no getting at it from here any more
+            return null;
+        }
+        if (ctx.world().getGameTime() - breakingSince > BREAKING_GIVE_UP_TICKS) {
+            logDirect("Couldn't break " + breaking.toShortString() + " in " + BREAKING_GIVE_UP_TICKS / 20 + " s, leaving it");
+            blacklist.add(breaking);
+            unreachableCount.merge(breaking, MAX_UNREACHABLE, Integer::sum);
+            breaking = null;
+            return null;
+        }
+        baritone.getInputOverrideHandler().clearAllKeys();
+        MovementHelper.switchToBestToolFor(ctx, state);
+        if (ctx.isLookingAt(breaking)) {
+            // on it already: stay exactly as we are. Re-aiming every tick (at whichever point of it is worked out from
+            // where we stand now) flicks between its faces, and off its edge onto the next block
+            baritone.getLookBehavior().updateTarget(ctx.playerRotations(), true);
+            baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
+            return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+        }
+        Rotation rot = reachable.get();
+        baritone.getLookBehavior().updateTarget(rot, true);
+        // never with the crosshair on something else: that would break it instead (with Falling Trees, a log above
+        // the base brings down only part of the tree)
+        HitResult over = ctx.objectMouseOver();
+        boolean onOther = over instanceof BlockHitResult && over.getType() == HitResult.Type.BLOCK && !((BlockHitResult) over).getBlockPos().equals(breaking);
+        if (!onOther && ctx.playerRotations().isReallyCloseTo(rot)) {
+            baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
+        }
+        return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
     }
 
 
@@ -714,6 +773,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         }
         this.desiredQuantity = quantity;
         this.depositedTargets = 0;
+        this.breaking = null;
         this.deposit.reset();
         this.knownOreLocations = new ArrayList<>();
         this.blacklist = new ArrayList<>();
