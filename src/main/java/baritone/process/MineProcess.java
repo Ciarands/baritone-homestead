@@ -239,7 +239,12 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                 breaking = inReach.get();
                 breakingSince = ctx.world().getGameTime();
             }
-            return keepBreaking();
+            PathingCommand breakingIt = keepBreaking();
+            if (breakingIt != null) {
+                return breakingIt;
+            }
+            // nothing to break there after all (no point of it to aim at, it changed, given up on): on to a goal,
+            // never no command while active (that's a crash)
         }
 
         PathingCommand command = updateGoal();
