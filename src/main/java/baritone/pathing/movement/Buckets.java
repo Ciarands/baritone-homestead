@@ -17,6 +17,8 @@
 
 package baritone.pathing.movement;
 
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.BucketItem;
@@ -30,6 +32,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 
@@ -42,15 +45,23 @@ public final class Buckets {
 
     private static final Map<Class<?>, Optional<Field>> FLUID_FIELDS = new ConcurrentHashMap<>();
 
+    /**
+     * Water buckets that never run out (Things' Bater Wucket): used before any other, so those stay full
+     */
+    private static final Set<ResourceLocation> ENDLESS = Set.of(new ResourceLocation("things", "bater_wucket"));
+
     private Buckets() {}
 
     /**
-     * @return The hotbar slot of a bucket that empties out water (anything the game counts as water), or -1. Plain
-     * water comes first, then other fluids counted as water (a mod's, which may do more than water does), then a
-     * bucket of fish, which would let the fish out too
+     * @return The hotbar slot of a bucket that empties out water (anything the game counts as water), or -1. One that
+     * never runs out comes first, then plain water, then other fluids counted as water (a mod's, which may do more than
+     * water does), then a bucket of fish, which would let the fish out too
      */
     public static int waterSlot(Inventory inventory) {
-        int slot = find(inventory, item -> !(item instanceof MobBucketItem), fluid -> fluid == Fluids.WATER);
+        int slot = find(inventory, item -> ENDLESS.contains(BuiltInRegistries.ITEM.getKey(item)), fluid -> fluid.is(FluidTags.WATER));
+        if (slot < 0) {
+            slot = find(inventory, item -> !(item instanceof MobBucketItem), fluid -> fluid == Fluids.WATER);
+        }
         if (slot < 0) {
             slot = find(inventory, item -> !(item instanceof MobBucketItem), fluid -> fluid.is(FluidTags.WATER));
         }
