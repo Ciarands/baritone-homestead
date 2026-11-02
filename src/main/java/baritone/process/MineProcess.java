@@ -219,9 +219,11 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         }
         // Collect target drops lying a few blocks off before breaking more: mining everything within reach first left
         // drops inside dense veins until nothing was in reach anymore (and with drops right next to us, in pockets we
-        // can't step into, they're left alone: we'd only stand there).
+        // can't step into, they're left alone: we'd only stand there). Unless what's around us is still thick with
+        // targets (a canopy of leaves, pillared up to): then they wait, it's no use climbing down and back up for them.
+        dropsWait = dropsCanWait();
         List<BlockPos> drops = settledDropsNearby();
-        if (!drops.isEmpty() && !Baritone.settings().legitMine.value) {
+        if (!drops.isEmpty() && !Baritone.settings().legitMine.value && !dropsWait) {
             collectingDrops = drops;
             return new PathingCommand(new GoalComposite(drops.stream().map(GoalTwoBlocks::new).toArray(Goal[]::new)), PathingCommandType.REVALIDATE_GOAL_AND_PATH);
         }
@@ -356,7 +358,10 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             // path to: an empty goal would only fail the search and blacklist things. Explore instead, below.
             if (!locs2.isEmpty()) {
                 // can't reassign locs, gotta make a new var locs2, because we use it in a lambda right here, and variables you use in a lambda must be effectively final
-                List<BlockPos> targets = fellTrees ? fallingTrees.targets(ctx.world(), locs2) : locs2;
+                List<BlockPos> all = fellTrees ? fallingTrees.targets(ctx.world(), locs2) : locs2;
+                // with the drops waiting, the blocks only: the path search would happily go down to the drops
+                List<BlockPos> blocks = dropsWait ? all.stream().filter(pos -> filter.has(ctx.world().getBlockState(pos))).collect(Collectors.toList()) : all;
+                List<BlockPos> targets = blocks.isEmpty() ? all : blocks;
                 Goal goal = new GoalComposite(targets.stream().map(loc -> coalesce(loc, targets, context)).toArray(Goal[]::new));
                 // An exploring path never ends in its goal, so plain revalidation doesn't interrupt it: targets showing
                 // up meanwhile (drops landing after the last block broke, ore coming into view) would wait for the
@@ -571,6 +576,50 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
      * Within this, a drop is picked up just by standing where we are, unless it's somewhere we can't step into anyway
      */
     private static final double PICKUP_DISTANCE_SQ = 1.5 * 1.5;
+    /**
+     * At least this many targets within this of the player is dense work: drops wait till it thins out
+     */
+    private static final int DENSE_RADIUS = 6;
+    private static final int DENSE_TARGETS = 8;
+    /**
+     * Drops this old are collected whatever's left to do (they're gone at five minutes)
+     */
+    private static final int DROP_WAIT_MAX_AGE = 20 * 120;
+    /**
+     * With fewer free slots, drops are collected (and room's kept) rather than left for later
+     */
+    private static final int DROP_WAIT_MIN_FREE_SLOTS = 3;
+    /**
+     * Whether drops wait this tick (see dropsCanWait)
+     */
+    private boolean dropsWait;
+
+    /**
+     * @return Whether drops can be left for later: what's around us is still thick with targets, no drop is getting
+     * old, and there's room. Coming down from up high for the first few drops and going back up costs more than
+     * it saves, every time
+     */
+    private boolean dropsCanWait() {
+        Inventory inv = ctx.player().getInventory();
+        if (inv.items.stream().filter(ItemStack::isEmpty).count() < DROP_WAIT_MIN_FREE_SLOTS) {
+            return false;
+        }
+        for (Entity entity : ((ClientLevel) ctx.world()).entitiesForRendering()) {
+            if (entity instanceof ItemEntity && ((ItemEntity) entity).getAge() > DROP_WAIT_MAX_AGE && isTargetDrop(((ItemEntity) entity).getItem())
+                    && entity.distanceToSqr(ctx.player()) <= NEARBY_DROP_DISTANCE_SQ * 4) {
+                return false;
+            }
+        }
+        BlockPos feet = ctx.playerFeet();
+        int dense = 0;
+        for (BlockPos pos : knownOreLocations) {
+            if (pos.distSqr(feet) <= DENSE_RADIUS * DENSE_RADIUS && filter.has(ctx.world().getBlockState(pos)) && ++dense >= DENSE_TARGETS) {
+                return true;
+            }
+        }
+        return false;
+    }
+
 
     /**
      * @return Positions of settled target drops within a few blocks, that there's room for, worth walking to
