@@ -71,7 +71,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
     private int depositedTargets; // target items deposited into the wireless terminal: they still count towards desiredQuantity
     private int targetsBeforeDeposit;
     private int tickCount;
-    private final WirelessTerminalDeposit deposit;
+    private final WirelessTerminal deposit;
     /**
      * Failed searches after which a location stays blacklisted for the rest of the run
      */
@@ -80,7 +80,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
 
     public MineProcess(Baritone baritone) {
         super(baritone);
-        this.deposit = new WirelessTerminalDeposit(ctx);
+        this.deposit = new WirelessTerminal(ctx);
         this.drops = new DropObserver(ctx);
     }
 
@@ -116,7 +116,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
                     targetsBeforeDeposit = targetCount();
                 }
                 baritone.getInputOverrideHandler().clearAllKeys();
-                switch (deposit.tick(this::isTargetDrop)) {
+                switch (deposit.deposit(this::isTargetDrop)) {
                     case RUNNING:
                         return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
                     case FAILED:
