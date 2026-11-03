@@ -181,7 +181,7 @@ public class MovementFall extends Movement {
     private Direction avoid() {
         for (int i = 0; i < 15; i++) {
             BlockState state = ctx.world().getBlockState(ctx.playerFeet().below(i));
-            if (state.getBlock() == Blocks.LADDER) {
+            if (state.getBlock() instanceof LadderBlock && state.hasProperty(LadderBlock.FACING)) {
                 return state.getValue(LadderBlock.FACING);
             }
         }

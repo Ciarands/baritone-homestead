@@ -272,7 +272,7 @@ public class MovementParkour extends Movement {
         MovementHelper.moveTowards(ctx, state, dest);
         if (ctx.playerFeet().equals(dest)) {
             Block d = BlockStateInterface.getBlock(ctx, dest);
-            if (d == Blocks.VINE || d == Blocks.LADDER) {
+            if (MovementHelper.isClimbable(d)) {
                 // it physically hurt me to add support for parkour jumping onto a vine
                 // but i did it anyway
                 return state.setStatus(MovementStatus.SUCCESS);

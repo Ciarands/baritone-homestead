@@ -63,7 +63,7 @@ public class MovementDownward extends Movement {
         }
         BlockState down = context.get(x, y - 1, z);
         Block downBlock = down.getBlock();
-        if (downBlock == Blocks.LADDER || downBlock == Blocks.VINE) {
+        if (MovementHelper.isClimbable(downBlock)) {
             return LADDER_DOWN_ONE_COST;
         } else {
             // we're standing on it, while it might be block falling, it'll be air by the time we get here in the movement

@@ -114,7 +114,7 @@ public class MovementDescend extends Movement {
             return;
         }
 
-        if (destDown.getBlock() == Blocks.LADDER || destDown.getBlock() == Blocks.VINE) {
+        if (MovementHelper.isClimbable(destDown.getBlock())) {
             return;
         }
         if (MovementHelper.canUseFrostWalker(context, destDown)) { // no need to check assumeWalkOnWater

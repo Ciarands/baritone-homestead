@@ -32,6 +32,7 @@ import baritone.utils.BlockStateInterface;
 import baritone.utils.ToolSet;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Inventory;
@@ -281,8 +282,7 @@ public interface MovementHelper extends ActionCosts, Helper {
         if (block instanceof BaseFireBlock
                 || block == Blocks.TRIPWIRE
                 || block == Blocks.COBWEB
-                || block == Blocks.VINE
-                || block == Blocks.LADDER
+                || isClimbable(block) // we'd grab on to it
                 || block == Blocks.COCOA
                 || block instanceof AzaleaBlock
                 || block instanceof DoorBlock
@@ -474,7 +474,7 @@ public interface MovementHelper extends ActionCosts, Helper {
         if (block instanceof AzaleaBlock) {
             return YES;
         }
-        if (block == Blocks.LADDER || (isClimbable(block) && Baritone.settings().allowVines.value)) { // TODO reconsider this
+        if (block instanceof LadderBlock || (isClimbable(block) && Baritone.settings().allowVines.value)) { // TODO reconsider this
             return YES;
         }
         if (block == Blocks.FARMLAND || block == Blocks.DIRT_PATH || block == Blocks.SOUL_SAND) {
@@ -640,12 +640,17 @@ public interface MovementHelper extends ActionCosts, Helper {
      * because movements can end/start on these blocks despite them not being canWalkOn.
      */
     static boolean isClimbable(Block block) {
-        return block == Blocks.LADDER
-            || block == Blocks.VINE
-            || block == Blocks.WEEPING_VINES
-            || block == Blocks.WEEPING_VINES_PLANT
-            || block == Blocks.TWISTING_VINES
-            || block == Blocks.TWISTING_VINES_PLANT;
+        // whatever the game climbs (the block tag: modded ladders, vines, ropes, ivy...), but scaffolding, climbed and
+        // stood on differently, and anything we couldn't be inside to climb it
+        BlockState state = block.defaultBlockState();
+        if (!state.is(BlockTags.CLIMBABLE) || block instanceof ScaffoldingBlock) {
+            return false;
+        }
+        try {
+            return !Block.isShapeFullBlock(state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO));
+        } catch (RuntimeException e) {
+            return true; // a shape that needs the world: it's tagged climbable, take it at that
+        }
     }
 
     static double getMiningDurationTicks(CalculationContext context, int x, int y, int z, boolean includeFalling) {
