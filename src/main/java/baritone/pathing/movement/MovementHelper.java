@@ -716,7 +716,7 @@ public interface MovementHelper extends ActionCosts, Helper {
             // through a canopy of leaves being sheared would leave nothing of them)
             IBaritone baritone = BaritoneAPI.getProvider().getBaritoneForPlayer(ctx.player());
             if (baritone instanceof Baritone && ((Baritone) baritone).getMineProcess().isTarget(b)) {
-                Predicate<ItemStack> getting = getting(ctx, b);
+                Predicate<ItemStack> getting = getting(b);
                 int slot = ts.getBestSlot(b.getBlock(), preferSilkTouch, false, getting);
                 if (slot >= 0) {
                     select(ctx, slot, getting);
@@ -728,12 +728,11 @@ public interface MovementHelper extends ActionCosts, Helper {
     }
 
     /**
-     * @return What gets something out of {@code b} when it's held breaking it, the backpack tool swapper's swap on the
-     * hit counted: shears are no use on leaves with a hoe in the backpack, it swaps them for the hoe
+     * @return What gets something out of {@code b} when it's held breaking it (shears on leaves, not a hoe)
      */
-    static Predicate<ItemStack> getting(IPlayerContext ctx, BlockState b) {
+    static Predicate<ItemStack> getting(BlockState b) {
         Block block = b.getBlock();
-        return stack -> BlockOptionalMeta.dropsWith(block, BackpackToolSwapper.swappedFor(ctx.player(), stack, b));
+        return stack -> BlockOptionalMeta.dropsWith(block, stack);
     }
 
     /**

@@ -65,6 +65,12 @@ public final class BackpackToolSwapper {
     private static Method sendToServer;
 
     private static final Map<UUID, Long> requestedAt = new HashMap<>();
+    /**
+     * When each backpack's contents were first asked for: not there yet, what it has is unknown for this long
+     */
+    private static final Map<UUID, Long> firstAsked = new HashMap<>();
+    private static final int ANSWER_TICKS = 100;
+    private static volatile boolean pending;
     private static long checkedAt = Long.MIN_VALUE / 2;
     private static volatile boolean active;
     /**
@@ -89,6 +95,15 @@ public final class BackpackToolSwapper {
     public static List<ItemStack> tools(LocalPlayer player) {
         refresh(player);
         return tools;
+    }
+
+    /**
+     * @return Whether a carried backpack's contents haven't come from the server yet (just after joining): whether it
+     * has a tool swapper, and what tools, isn't known
+     */
+    public static boolean pending(LocalPlayer player) {
+        refresh(player);
+        return pending;
     }
 
     /**
@@ -127,6 +142,28 @@ public final class BackpackToolSwapper {
         return stack.isCorrectToolForDrops(state) && stack.getDestroySpeed(state) > 1.5F;
     }
 
+    /**
+     * @return Whether a carried backpack's tool swapper has a tool of its own for {@code state} and gets it in hand: one
+     * in the hotbar it keeps there (swapped in already), or one in the backpack it swaps in for something in the hotbar
+     * it swaps (a tool, or a sword in its "any" mode)
+     */
+    public static boolean handles(LocalPlayer player, BlockState state) {
+        if (!active(player)) {
+            return false;
+        }
+        boolean swappable = false;
+        for (int slot = 0; slot < 9; slot++) {
+            ItemStack stack = player.getInventory().getItem(slot);
+            if (isTool(stack)) {
+                if (goodAt(stack, state)) {
+                    return true;
+                }
+                swappable = true;
+            }
+        }
+        return swappable && tools.stream().anyMatch(tool -> goodAt(tool, state));
+    }
+
     private static boolean load() {
         if (missing) {
             return false;
@@ -160,8 +197,10 @@ public final class BackpackToolSwapper {
         checkedAt = now;
         if (!load()) {
             active = false;
+            pending = false;
             return;
         }
+        boolean unknown = false;
         boolean found = false;
         boolean anySwapsSwords = false;
         List<ItemStack> backpackTools = new ArrayList<>();
@@ -174,6 +213,10 @@ public final class BackpackToolSwapper {
                 }
                 UUID id = tag.getUUID("contentsUuid");
                 CompoundTag contents = (CompoundTag) contentsOf.invoke(contentsStore, id);
+                firstAsked.putIfAbsent(id, now);
+                if (!contents.contains("inventory") && !contents.contains("upgradeInventory") && now - firstAsked.get(id) < ANSWER_TICKS) {
+                    unknown = true;
+                }
                 if (now - requestedAt.getOrDefault(id, Long.MIN_VALUE / 2) >= REQUEST_TICKS || now < requestedAt.get(id)) {
                     requestedAt.put(id, now);
                     sendToServer.invoke(null, requestContents.newInstance(id));
@@ -196,6 +239,7 @@ public final class BackpackToolSwapper {
         active = found;
         swords = anySwapsSwords;
         tools = backpackTools;
+        pending = unknown;
     }
 
     private static final int NO_SWAP = 0;

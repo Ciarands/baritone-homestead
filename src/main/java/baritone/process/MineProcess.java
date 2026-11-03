@@ -49,6 +49,7 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 
 import java.util.*;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -68,6 +69,7 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
     private Map<BlockPos, Integer> unreachableCount; // how many failed searches each location was part of, this run
     private int failuresWithNothingKnown; // consecutive failed searches with no known targets left: we can't move at all
     private List<BlockPos> collectingDrops; // the drops we're heading for, or null when heading for targets
+    private String outOfTool; // why it's stopping, once nothing at hand gets what's mined: after collecting what's lying about
     private Map<BlockPos, Long> anticipatedDrops;
     private BlockPos branchPoint;
     private GoalRunAway branchPointRunaway;
@@ -157,9 +159,6 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         if (stillBreaking != null) {
             return stillBreaking;
         }
-        if (!isActive()) {
-            return null; // stopped: nothing to get them with
-        }
         // Locations blacklisted as unreachable were only unreachable from where we stood. Once we've moved away,
         // give them another chance, otherwise reachable targets are thrown away for good; but not endlessly: one
         // that failed from several places is sealed off (in someone's wall, encased), and each retry costs a search.
@@ -228,6 +227,17 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         // targets (a canopy of leaves, pillared up to): then they wait, it's no use climbing down and back up for them.
         // Getting old (they're gone at five minutes), they're collected whatever's left to do, and from further off:
         // the ground under a canopy is more than a few blocks down
+        if (outOfTool != null) {
+            // out of anything that gets what's mined: what's lying about of it first (or it's gone in five minutes)
+            List<BlockPos> lying = settledDrops(OLD_DROP_DISTANCE_SQ, SETTLED_DROP_AGE);
+            if (!lying.isEmpty() && !Baritone.settings().legitMine.value) {
+                collectingDrops = lying;
+                return new PathingCommand(new GoalComposite(lying.stream().map(GoalTwoBlocks::new).toArray(Goal[]::new)), PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+            }
+            logDirect(outOfTool);
+            cancel();
+            return null;
+        }
         List<BlockPos> old = settledDrops(OLD_DROP_DISTANCE_SQ, DROP_WAIT_MAX_AGE);
         dropsWait = old.isEmpty() && dropsCanWait();
         List<BlockPos> drops = new ArrayList<>(settledDrops(NEARBY_DROP_DISTANCE_SQ, SETTLED_DROP_AGE));
@@ -254,9 +264,6 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
             if (breakingIt != null) {
                 return breakingIt;
             }
-            if (!isActive()) {
-                return null; // stopped: nothing to get them with
-            }
             // nothing to break there after all (no point of it to aim at, it changed, given up on): on to a goal,
             // never no command while active (that's a crash)
         }
@@ -278,6 +285,10 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
      */
     private BlockPos breaking;
     private long breakingSince;
+    /**
+     * Blocks a backpack's tool swapper's choice of tool has been noted for (once each mining)
+     */
+    private final Set<Block> swapNoted = new HashSet<>();
     /**
      * Kept at for this long, a block is given up on (and blacklisted): it isn't coming down
      */
@@ -307,26 +318,31 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         }
         baritone.getInputOverrideHandler().clearAllKeys();
         // with something that gets it: leaves broken with anything but shears (a fast enchanted hoe, a bare hand once
-        // the shears are down to what itemSaver keeps, shears a backpack's tool swapper swaps for its hoe) are just gone
+        // the shears are down to what itemSaver keeps) are just gone. But a backpack's tool swapper choosing its own
+        // tool for it (a hoe in place of the shears, on leaves) has its way: it's the player's to set up
         Block block = state.getBlock();
-        if (!MovementHelper.switchToBestToolFor(ctx, state, MovementHelper.getting(ctx, state))) {
-            String name = block.getName().getString();
-            // something that would get it, swapped by the tool swapper for something that doesn't
-            Optional<ItemStack> swappedAway = ctx.player().getInventory().items.subList(0, 9).stream()
-                    .filter(stack -> !stack.isEmpty() && BlockOptionalMeta.dropsWith(block, stack))
-                    .filter(stack -> !BlockOptionalMeta.dropsWith(block, BackpackToolSwapper.swappedFor(ctx.player(), stack, state)))
-                    .findFirst();
-            if (swappedAway.isPresent()) {
-                ItemStack in = BackpackToolSwapper.swappedFor(ctx.player(), swappedAway.get(), state);
-                logDirect("Stopped: the backpack's tool swapper would swap the " + swappedAway.get().getHoverName().getString() + " for the "
-                        + in.getHoverName().getString() + " on hitting " + name + ", which gets nothing out of it (it doesn't count shears as the tool"
-                        + " for leaves): take that out of the backpack, or filter it out of the swapper");
-            } else {
-                logDirect("Stopped: nothing in the hotbar gets anything out of " + name + " (it needs shears or silk touch, say"
-                        + (Baritone.settings().itemSaver.value ? "; itemSaver leaves a tool's last " + Baritone.settings().itemSaverThreshold.value + " uses alone" : "") + ")");
+        String name = block.getName().getString();
+        Predicate<ItemStack> getting = MovementHelper.getting(state);
+        if (MovementHelper.switchToBestToolFor(ctx, state, getting)) {
+            ItemStack held = ctx.player().getMainHandItem();
+            ItemStack in = BackpackToolSwapper.swappedFor(ctx.player(), held, state);
+            if (in != held && !getting.test(in) && swapNoted.add(block)) {
+                logDebug("The backpack's tool swapper swaps the " + held.getHoverName().getString() + " for its " + in.getHoverName().getString() + " on " + name
+                        + ", which gets nothing out of it (it doesn't count shears as the tool for leaves); letting it");
             }
+        } else if (BackpackToolSwapper.handles(ctx.player(), state)) {
+            MovementHelper.switchToBestToolFor(ctx, state);
+            if (swapNoted.add(block)) {
+                logDebug("Nothing in the hotbar gets anything out of " + name + "; going on with what the backpack's tool swapper has for it");
+            }
+        } else if (BackpackToolSwapper.pending(ctx.player())) {
+            // a backpack's contents not here yet (just joined): whether its tool swapper has something for it isn't
+            // known, so not stopping over it yet
+            return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+        } else {
+            outOfTool = "Stopped: nothing in the hotbar gets anything out of " + name + " (it needs shears or silk touch, say"
+                    + (Baritone.settings().itemSaver.value ? "; itemSaver leaves a tool's last " + Baritone.settings().itemSaverThreshold.value + " uses alone" : "") + ")";
             breaking = null;
-            cancel();
             return null;
         }
         if (ctx.isLookingAt(breaking)) {
@@ -854,6 +870,8 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
     @Override
     public void mine(int quantity, BlockOptionalMetaLookup filter) {
         this.filter = filter;
+        swapNoted.clear();
+        outOfTool = null;
         if (this.filterFilter() == null) {
             this.filter = null;
         }
