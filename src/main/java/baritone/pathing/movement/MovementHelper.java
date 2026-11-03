@@ -716,15 +716,24 @@ public interface MovementHelper extends ActionCosts, Helper {
             // through a canopy of leaves being sheared would leave nothing of them)
             IBaritone baritone = BaritoneAPI.getProvider().getBaritoneForPlayer(ctx.player());
             if (baritone instanceof Baritone && ((Baritone) baritone).getMineProcess().isTarget(b)) {
-                Block block = b.getBlock();
-                int getting = ts.getBestSlot(block, preferSilkTouch, false, stack -> BlockOptionalMeta.dropsWith(block, stack));
-                if (getting >= 0) {
-                    select(ctx, getting);
+                Predicate<ItemStack> getting = getting(ctx, b);
+                int slot = ts.getBestSlot(b.getBlock(), preferSilkTouch, false, getting);
+                if (slot >= 0) {
+                    select(ctx, slot, getting);
                     return;
                 }
             }
-            select(ctx, ts.getBestSlot(b.getBlock(), preferSilkTouch));
+            select(ctx, ts.getBestSlot(b.getBlock(), preferSilkTouch), stack -> true);
         }
+    }
+
+    /**
+     * @return What gets something out of {@code b} when it's held breaking it, the backpack tool swapper's swap on the
+     * hit counted: shears are no use on leaves with a hoe in the backpack, it swaps them for the hoe
+     */
+    static Predicate<ItemStack> getting(IPlayerContext ctx, BlockState b) {
+        Block block = b.getBlock();
+        return stack -> BlockOptionalMeta.dropsWith(block, BackpackToolSwapper.swappedFor(ctx.player(), stack, b));
     }
 
     /**
@@ -740,17 +749,18 @@ public interface MovementHelper extends ActionCosts, Helper {
         if (slot < 0) {
             return false;
         }
-        select(ctx, slot);
+        select(ctx, slot, usable);
         return true;
     }
 
-    private static void select(IPlayerContext ctx, int slot) {
+    private static void select(IPlayerContext ctx, int slot, Predicate<ItemStack> usable) {
         Inventory inv = ctx.player().getInventory();
         inv.selected = slot;
         if (!BackpackToolSwapper.isTool(inv.getSelected()) && BackpackToolSwapper.active(ctx.player())) {
-            // a backpack's tool swapper swaps a tool in hand for its best one, and nothing else: hold one
+            // a backpack's tool swapper swaps a tool in hand for its best one, and nothing else: hold one (that's usable
+            // too, swapped)
             for (int i = 0; i < 9; i++) {
-                if (BackpackToolSwapper.isTool(inv.getItem(i))) {
+                if (BackpackToolSwapper.isTool(inv.getItem(i)) && usable.test(inv.getItem(i))) {
                     inv.selected = i;
                     break;
                 }

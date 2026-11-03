@@ -27,6 +27,7 @@ import net.minecraft.world.item.DiggerItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ShearsItem;
 import net.minecraft.world.item.SwordItem;
+import net.minecraft.world.level.block.state.BlockState;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
@@ -96,6 +97,34 @@ public final class BackpackToolSwapper {
      */
     public static boolean isTool(ItemStack stack) {
         return stack.getItem() instanceof DiggerItem || stack.getItem() instanceof ShearsItem || (swords && stack.getItem() instanceof SwordItem);
+    }
+
+    /**
+     * @return What's in hand once {@code held} hits {@code state}: the swapper puts in the backpack tool that's best at
+     * the block (right for it and fastest, where right is the game's "correct tool for drops": never shears on
+     * leaves, a hoe is) in place of a tool in hand that's slower at it or not right for it. {@code held} itself if it
+     * stays
+     */
+    public static ItemStack swappedFor(LocalPlayer player, ItemStack held, BlockState state) {
+        if (!active(player) || !isTool(held)) {
+            return held;
+        }
+        ItemStack in = held;
+        float best = goodAt(held, state) ? held.getDestroySpeed(state) : 0;
+        for (ItemStack tool : tools) {
+            if (goodAt(tool, state) && tool.getDestroySpeed(state) > best) {
+                best = tool.getDestroySpeed(state);
+                in = tool;
+            }
+        }
+        return in;
+    }
+
+    /**
+     * The swapper's own test of a tool for a block
+     */
+    private static boolean goodAt(ItemStack stack, BlockState state) {
+        return stack.isCorrectToolForDrops(state) && stack.getDestroySpeed(state) > 1.5F;
     }
 
     private static boolean load() {

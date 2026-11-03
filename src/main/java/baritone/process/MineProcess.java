@@ -29,6 +29,7 @@ import baritone.cache.CachedChunk;
 import baritone.pathing.movement.CalculationContext;
 import baritone.pathing.movement.MovementHelper;
 import baritone.pathing.path.PathExecutor;
+import baritone.utils.BackpackToolSwapper;
 import baritone.utils.BaritoneProcessHelper;
 import baritone.utils.BlockStateInterface;
 import baritone.utils.pathing.Avoidance;
@@ -306,11 +307,24 @@ public final class MineProcess extends BaritoneProcessHelper implements IMinePro
         }
         baritone.getInputOverrideHandler().clearAllKeys();
         // with something that gets it: leaves broken with anything but shears (a fast enchanted hoe, a bare hand once
-        // the shears are down to what itemSaver keeps) are just gone
+        // the shears are down to what itemSaver keeps, shears a backpack's tool swapper swaps for its hoe) are just gone
         Block block = state.getBlock();
-        if (!MovementHelper.switchToBestToolFor(ctx, state, stack -> BlockOptionalMeta.dropsWith(block, stack))) {
-            logDirect("Stopped: nothing in the hotbar gets anything out of " + block.getName().getString() + " (it needs shears or silk touch, say"
-                    + (Baritone.settings().itemSaver.value ? "; itemSaver leaves a tool's last " + Baritone.settings().itemSaverThreshold.value + " uses alone" : "") + ")");
+        if (!MovementHelper.switchToBestToolFor(ctx, state, MovementHelper.getting(ctx, state))) {
+            String name = block.getName().getString();
+            // something that would get it, swapped by the tool swapper for something that doesn't
+            Optional<ItemStack> swappedAway = ctx.player().getInventory().items.subList(0, 9).stream()
+                    .filter(stack -> !stack.isEmpty() && BlockOptionalMeta.dropsWith(block, stack))
+                    .filter(stack -> !BlockOptionalMeta.dropsWith(block, BackpackToolSwapper.swappedFor(ctx.player(), stack, state)))
+                    .findFirst();
+            if (swappedAway.isPresent()) {
+                ItemStack in = BackpackToolSwapper.swappedFor(ctx.player(), swappedAway.get(), state);
+                logDirect("Stopped: the backpack's tool swapper would swap the " + swappedAway.get().getHoverName().getString() + " for the "
+                        + in.getHoverName().getString() + " on hitting " + name + ", which gets nothing out of it (it doesn't count shears as the tool"
+                        + " for leaves): take that out of the backpack, or filter it out of the swapper");
+            } else {
+                logDirect("Stopped: nothing in the hotbar gets anything out of " + name + " (it needs shears or silk touch, say"
+                        + (Baritone.settings().itemSaver.value ? "; itemSaver leaves a tool's last " + Baritone.settings().itemSaverThreshold.value + " uses alone" : "") + ")");
+            }
             breaking = null;
             cancel();
             return null;
